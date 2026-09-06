@@ -29,6 +29,7 @@ import {
 import {
   scoreTradeCandidates,
   evaluateMatchingDecision,
+  isCompletePreOrderMatch,
 } from './server/matcher';
 import { classifyCallIntent } from './server/classifier';
 import { evaluateDeterministicQ1 } from './server/q1-evaluator';
@@ -1541,9 +1542,10 @@ function resolveAuthoritativeContextForCall(callId: number): {
   } else {
     // 2. Perform authoritative matching without arbitrary array fallbacks
     const allTrades = sqlite.prepare('SELECT * FROM trades').all() as unknown as TradeRecord[];
-    const candidates = scoreTradeCandidates(call, allTrades);
+    const eligibleTrades = allTrades.filter((trade) => isCompletePreOrderMatch(call, trade));
+    const candidates = scoreTradeCandidates(call, eligibleTrades);
     const decision = evaluateMatchingDecision(candidates);
-    resolvedTrade = decision.bestTrade;
+    resolvedTrade = decision.matchStatus === 'matched' ? decision.bestTrade : null;
   }
 
   // Derive client code from call metadata or resolved trade (never from arbitrary trade[0])
@@ -1597,14 +1599,26 @@ function runMatchingForCall(callId: number): MatchRecord | null {
   const trades = sqlite.prepare('SELECT * FROM trades').all() as unknown as TradeRecord[];
   if (trades.length === 0) return null;
 
-  const candidates = scoreTradeCandidates(call, trades);
+  // Non-order conversations must never create a match or enter the audit queue.
+  const eligibleTrades = trades.filter((trade) => isCompletePreOrderMatch(call, trade));
+  if (eligibleTrades.length === 0) {
+    sqlite.prepare('DELETE FROM matches WHERE call_id = ?').run(call.id);
+    sqlite.prepare("UPDATE calls SET call_type = 'regular' WHERE id = ?").run(call.id);
+    return null;
+  }
+
+  const candidates = scoreTradeCandidates(call, eligibleTrades);
   const decision = evaluateMatchingDecision(candidates);
 
-  if (!decision.bestTrade || decision.matchStatus === 'unmatched') {
+  if (!decision.bestTrade || decision.matchStatus !== 'matched') {
+    sqlite.prepare('DELETE FROM matches WHERE call_id = ?').run(call.id);
+    sqlite.prepare("UPDATE calls SET call_type = 'regular' WHERE id = ?").run(call.id);
     return null;
   }
 
   const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
+
+  sqlite.prepare("UPDATE calls SET call_type = 'pre_order', updated_at = ? WHERE id = ?").run(now, call.id);
 
   // Persist or Update Match Record
   const existing = sqlite
@@ -1684,11 +1698,30 @@ function runMatchingForCall(callId: number): MatchRecord | null {
   return sqlite.prepare('SELECT * FROM matches WHERE id = ?').get(matchId) as unknown as MatchRecord;
 }
 
+/** Remove records created by the previous broad audit queue rules. */
+function pruneNonEligibleComplianceRecords(): void {
+  const staleCalls = sqlite.prepare(`
+    SELECT c.id
+    FROM calls c
+    WHERE EXISTS (SELECT 1 FROM audits a WHERE a.call_id = c.id)
+      AND NOT EXISTS (
+        SELECT 1 FROM matches m
+        WHERE m.call_id = c.id AND m.status = 'matched'
+      )
+  `).all() as Array<{ id: number }>;
+
+  for (const { id } of staleCalls) {
+    sqlite.prepare('DELETE FROM scorecards WHERE call_id = ?').run(id);
+    sqlite.prepare('DELETE FROM audits WHERE call_id = ?').run(id);
+    sqlite.prepare('DELETE FROM matches WHERE call_id = ?').run(id);
+  }
+}
+
 // -------------------------------------------------------------
 // Real Persistent Queue Worker Engine with Multi-Job Concurrency
 // -------------------------------------------------------------
 let activeWorkerCount = 0;
-const MAX_CONCURRENT_WORKERS = 3;
+const MAX_CONCURRENT_WORKERS = Number(process.env.AUDITEQ_WORKERS || 6);
 
 async function claimAndProcessNextJob(): Promise<boolean> {
   if (activeWorkerCount >= MAX_CONCURRENT_WORKERS) return false;
@@ -1725,7 +1758,7 @@ async function claimAndProcessNextJob(): Promise<boolean> {
     currentJob = job;
     claimedJobId = job.id;
     const workerId = `worker_${process.pid}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-    const leaseUntil = new Date(Date.now() + 180000).toISOString().replace('T', ' ').slice(0, 19); // 3 min lease
+      const leaseUntil = new Date(Date.now() + 600000).toISOString().replace('T', ' ').slice(0, 19); // 10 min lease
 
     const updateRes = sqlite
       .prepare(`
@@ -1805,11 +1838,16 @@ async function claimAndProcessNextJob(): Promise<boolean> {
       addLog('info', 'WORKER_TRANSCRIBE_COMPLETE', `Transcription and classification finished for Call #${call.id} (${classification.call_type}).`);
 
       // Only pre_order calls enter trade matching & compliance audit workflow
-      if (classification.call_type === 'pre_order') {
-        runMatchingForCall(call.id);
+      const match = classification.call_type === 'pre_order' ? runMatchingForCall(call.id) : null;
+      sqlite.prepare('UPDATE calls SET call_type = ?, updated_at = ? WHERE id = ?').run(
+        match?.status === 'matched' ? 'pre_order' : 'regular',
+        now,
+        call.id
+      );
+      if (match?.status === 'matched') {
         enqueueJob('audit', call.id, `call:${call.id}:audit`);
       } else {
-        addLog('info', 'CALL_FILTERED', `Call #${call.id} classified as "${classification.call_type}". Bypassing trade compliance audit.`);
+        addLog('info', 'CALL_FILTERED', `Call #${call.id} is not a confirmed pre-order/trade match. Bypassing trade compliance audit.`);
       }
 
     } else if (job.job_type === 'audit') {
@@ -1817,7 +1855,8 @@ async function claimAndProcessNextJob(): Promise<boolean> {
       if (!call) throw new Error(`Call #${job.entity_id} not found.`);
 
       // MANDATE: Only pre-order calls enter trade compliance auditing
-      if (call.call_type !== 'pre_order') {
+      const { resolvedTrade: auditTrade } = resolveAuthoritativeContextForCall(call.id);
+      if (call.call_type !== 'pre_order' || !auditTrade) {
         addLog('info', 'AUDIT_SKIPPED', `Call #${call.id} classified as "${call.call_type}". Only pre-order calls enter trade audit.`);
         sqlite.prepare("UPDATE calls SET status = 'regular_closed', updated_at = ? WHERE id = ?").run(now, call.id);
         sqlite.prepare("UPDATE jobs SET status = 'completed', locked_at = NULL, locked_by = NULL, updated_at = ? WHERE id = ?").run(now, job.id);
@@ -1944,9 +1983,9 @@ async function claimAndProcessNextJob(): Promise<boolean> {
 // Background Worker Loop (1-second heartbeat) with parallel worker dispatch
 setInterval(async () => {
   try {
-    while (activeWorkerCount < MAX_CONCURRENT_WORKERS) {
-      const dispatched = await claimAndProcessNextJob();
-      if (!dispatched) break;
+    const availableSlots = Math.max(0, MAX_CONCURRENT_WORKERS - activeWorkerCount);
+    for (let slot = 0; slot < availableSlots; slot++) {
+      void claimAndProcessNextJob();
     }
   } catch (err) {
     console.error('Worker loop heartbeat error:', err);
@@ -2856,6 +2895,10 @@ ${call.transcript || '(No speech transcript recorded)'}
 
       runMatchingForCall(call.id);
       const { resolvedTrade, clientCode } = resolveAuthoritativeContextForCall(call.id);
+
+      if (!resolvedTrade) {
+        return res.status(400).json({ ok: false, error: 'Only confirmed pre-order calls with a strict trade match can be audited.' });
+      }
       const auditResult = await auditWithGroq(call, resolvedTrade, clientCode);
       const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
 
@@ -2947,11 +2990,13 @@ ${call.transcript || '(No speech transcript recorded)'}
       for (const c of calls) {
         const m = runMatchingForCall(c.id);
         if (m) matchesTriggered++;
-        if (c.transcript && c.transcript.trim()) {
+        if (m?.status === 'matched') {
           enqueueJob('audit', c.id, `call:${c.id}:audit`);
           auditsTriggered++;
         }
       }
+
+      pruneNonEligibleComplianceRecords();
 
       return res.json({
         ok: true,
@@ -3059,6 +3104,8 @@ ${call.transcript || '(No speech transcript recorded)'}
       const match = runMatchingForCall(c.id);
       if (match) matchedCount++;
     }
+
+    pruneNonEligibleComplianceRecords();
 
     addLog('info', 'MATCHING_EXECUTED', `Deterministic matching engine executed across ${calls.length} calls. ${matchedCount} match(es) correlated.`);
     return res.json({
@@ -3202,7 +3249,7 @@ ${call.transcript || '(No speech transcript recorded)'}
   });
 
   apiRouter.post('/audits/run-all', requireAuth, async (_req: Request, res: Response) => {
-    const calls = sqlite.prepare('SELECT * FROM calls WHERE transcript IS NOT NULL AND transcript != ""').all() as unknown as CallRecord[];
+    const calls = sqlite.prepare("SELECT * FROM calls WHERE transcript IS NOT NULL AND transcript != '' AND call_type = 'pre_order'").all() as unknown as CallRecord[];
     let auditedCount = 0;
     const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
 
@@ -3216,6 +3263,7 @@ ${call.transcript || '(No speech transcript recorded)'}
 
         runMatchingForCall(call.id);
         const { resolvedTrade, clientCode } = resolveAuthoritativeContextForCall(call.id);
+        if (!resolvedTrade) continue;
 
         const auditResult = await auditWithGroq(call, resolvedTrade, clientCode);
         let auditId = audit?.id;

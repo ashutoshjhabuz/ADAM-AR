@@ -29,6 +29,26 @@ export interface MatchDecision {
 }
 
 /**
+ * A call is audit-eligible only when the spoken order contains all four
+ * identifying trade attributes. Phone and date are used for Q1/context, not
+ * as substitutes for spoken order evidence.
+ */
+export function isCompletePreOrderMatch(call: CallRecord, trade: TradeRecord): boolean {
+  const transcript = call.transcript || '';
+  if (!transcript) return false;
+
+  const hasClientCode = Boolean(trade.client && matchClientCodeInTranscript(trade.client, transcript).matched);
+  const hasSymbol = Boolean(trade.symbol && matchSymbolInTranscript(trade.symbol, transcript).matched);
+  const hasQuantity = Boolean(trade.quantity && trade.quantity > 0 && matchQuantityInTranscript(trade.quantity, transcript));
+  const hasPrice = Boolean(
+    (trade.price && trade.price > 0 && matchPriceInTranscript(trade.price, transcript)) ||
+    /\b(?:cmp|current\s+market\s+price|market\s+(?:price|rate)|bhav(?:\s+pe)?)\b/i.test(transcript)
+  );
+
+  return hasClientCode && hasSymbol && hasQuantity && hasPrice;
+}
+
+/**
  * Executes multi-anchor candidate scoring across all available trades for a given call.
  */
 export function scoreTradeCandidates(call: CallRecord, trades: TradeRecord[]): ScoredCandidate[] {
