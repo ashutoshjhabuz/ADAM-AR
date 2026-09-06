@@ -484,3 +484,20 @@ export interface SystemIntegrations {
   };
 }
 
+export interface FailedJobItem {
+  id: number;
+  job_type: string;
+  entity_id: number;
+  entity_name?: string;
+  caller_name?: string;
+  stage: string;
+  attempts: number;
+  max_attempts: number;
+  last_error: string;
+  original_error?: string;
+  action_hint: string;
+  can_retry: boolean;
+  created_at: string;
+  updated_at: string;
+}
+

@@ -10,6 +10,7 @@ import type {
   ReportArchive,
   SystemIntegrations,
   UserProfile,
+  FailedJobItem,
 } from '../types';
 
 export const AUTH_TOKEN_KEY = 'auditeq_auth_token';
@@ -144,6 +145,15 @@ export const api = {
     }),
   startPipeline: () =>
     apiRequest<{ ok: boolean; message: string }>('/api/pipeline/start', {
+      method: 'POST',
+    }),
+  getFailedJobs: () => apiRequest<FailedJobItem[]>('/api/jobs/failed'),
+  retryJob: (jobId: number) =>
+    apiRequest<{ ok: boolean; message: string }>(`/api/jobs/${jobId}/retry`, {
+      method: 'POST',
+    }),
+  retryAllFailedJobs: () =>
+    apiRequest<{ ok: boolean; retried: number; message: string }>('/api/jobs/retry-all', {
       method: 'POST',
     }),
   reviewAudit: (auditId: number, reviewData: any) =>

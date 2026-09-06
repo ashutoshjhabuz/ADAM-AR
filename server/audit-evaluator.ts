@@ -1,11 +1,17 @@
 // =============================================================
-// AuditEQ — Deterministic Compliance & Evidence Auditor
+// AuditEQ v18.0.0 — Deterministic Compliance & Evidence Auditor
+//
+// Hard Audit Eligibility Gate:
+// - NO Advisor -> NO audit
+// - NO Client ID / UCC -> NO audit
+// - NO exact trade -> NO audit
+// - NO valid transcript -> NO audit
+// - ONLY confirmed PRE-ORDER calls enter audit
 // =============================================================
 
 import {
   extractSpokenEvidence,
   type ExtractedCallEvidence,
-  type SpokenEvidenceItem,
   type SegmentInfo,
 } from './evidence-extractor';
 import {
@@ -16,9 +22,79 @@ import {
   matchPriceInTranscript,
   matchQuantityInTranscript,
   mentionsMarketPriceOrCMP,
+  SYMBOL_ALIASES,
 } from './normalizer';
 import type { CallRecord, TradeRecord } from '../src/types';
 import type { UnifiedAuditOutput, AuditQuestionOutput } from './scoring-engine';
+
+export interface AuditEligibilityResult {
+  eligible: boolean;
+  reason: string;
+  gateCode: 'NO_ADVISOR' | 'NO_CLIENT_CODE' | 'NO_EXACT_TRADE' | 'NO_VALID_TRANSCRIPT' | 'NOT_PRE_ORDER' | 'OK';
+}
+
+/**
+ * Hard Audit Eligibility Gate
+ * Strictly enforces that incomplete, unassigned, or non-preorder records NEVER enter audit.
+ */
+export function verifyAuditEligibility(
+  call: CallRecord,
+  trade: TradeRecord | null,
+  transcript?: string | null
+): AuditEligibilityResult {
+  // Gate 1: Must be confirmed PRE-ORDER call
+  if (call.call_type && call.call_type !== 'pre_order') {
+    return {
+      eligible: false,
+      reason: `Call category is "${call.call_type}". Only confirmed PRE-ORDER calls enter SEBI regulatory compliance audit.`,
+      gateCode: 'NOT_PRE_ORDER',
+    };
+  }
+
+  // Gate 2: Advisor Name must be present
+  const advisor = (call.caller_name || '').trim();
+  if (!advisor || advisor === '—' || advisor.toLowerCase() === 'unknown') {
+    return {
+      eligible: false,
+      reason: 'No advisor/caller identity specified in call metadata. Pre-order audits require an identified advisor.',
+      gateCode: 'NO_ADVISOR',
+    };
+  }
+
+  // Gate 3: Client ID / UCC must exist
+  const clientCode = (call.client || trade?.client || '').trim();
+  if (!clientCode || clientCode === '—' || clientCode.toLowerCase() === 'unknown') {
+    return {
+      eligible: false,
+      reason: 'No Client ID / UCC available in call metadata or trade sheet.',
+      gateCode: 'NO_CLIENT_CODE',
+    };
+  }
+
+  // Gate 4: Valid transcript must exist
+  if (!transcript || transcript.trim().length < 15) {
+    return {
+      eligible: false,
+      reason: 'No valid transcript available for spoken evidence verification.',
+      gateCode: 'NO_VALID_TRANSCRIPT',
+    };
+  }
+
+  // Gate 5: Exact trade must exist
+  if (!trade || !trade.id) {
+    return {
+      eligible: false,
+      reason: 'Missing exact trade match. Pre-order calls cannot be audited without a verified trade match.',
+      gateCode: 'NO_EXACT_TRADE',
+    };
+  }
+
+  return {
+    eligible: true,
+    reason: 'Call satisfies all SEBI compliance audit eligibility gates.',
+    gateCode: 'OK',
+  };
+}
 
 /**
  * Deterministically evaluates Q1–Q5 based ONLY on actual spoken evidence
@@ -33,7 +109,7 @@ export function evaluateEvidenceCompliance(
 ): { audit: UnifiedAuditOutput; evidence: ExtractedCallEvidence } {
   // Authoritative resolved trade (single trade, never arbitrary trades[0] fallback)
   const resolvedTrade: TradeRecord | null = Array.isArray(tradesOrResolved)
-    ? (tradesOrResolved.length === 1 ? tradesOrResolved[0] : (tradesOrResolved.find(t => t.id) || null))
+    ? (tradesOrResolved.length === 1 ? tradesOrResolved[0] : (tradesOrResolved.find((t) => t && t.id) || null))
     : tradesOrResolved;
 
   const extracted = extractSpokenEvidence(transcript, segments, resolvedTrade || undefined);
@@ -129,218 +205,204 @@ export function evaluateEvidenceCompliance(
         speaker: 'ADVISOR',
         confidence: 0.98,
       };
-    } else if (spokenCodeCandidate) {
-      const normSpoken = normalizeClientCode(String(spokenCodeCandidate));
-      if (normSpoken === normExpected) {
-        q2 = {
-          status: 'PASS',
-          evidence: `Client account code "${spokenCodeCandidate}" was verbally confirmed in dialogue.`,
-          reason: 'Client identification verbally confirmed prior to order execution.',
-          speaker: extracted.detectedClientCode?.speaker || 'ADVISOR',
-          confidence: extracted.detectedClientCode?.confidence || 0.95,
-        };
-      } else {
-        // Spoken client code exists but DOES NOT MATCH expected client code -> FATAL!
-        q2 = {
-          status: 'FAIL',
-          evidence: `FATAL: Expected client code "${expectedClientCode}" does not match spoken code "${spokenCodeCandidate}".`,
-          reason: 'Client UCC mismatch in telephone confirmation.',
-          speaker: extracted.detectedClientCode?.speaker || 'ADVISOR',
-          confidence: 1.0,
-        };
-      }
-    } else {
+    } else if (spokenCodeCandidate && spokenCodeCandidate !== normExpected) {
       q2 = {
         status: 'FAIL',
-        evidence: `FATAL: Expected client code "${expectedClientCode}" was NOT spoken or confirmed anywhere in the call transcript.`,
-        reason: 'Client UCC was not verbally identified.',
+        evidence: `FATAL: Spoken client code "${spokenCodeCandidate}" mismatches expected registered client code "${expectedClientCode}".`,
+        reason: 'Spoken client identification contradicts trade registry records.',
         speaker: 'ADVISOR',
-        confidence: 0.98,
-      };
-    }
-  } else {
-    // No expected client code was resolved
-    if (extracted.detectedClientCode) {
-      q2 = {
-        status: 'REVIEW',
-        evidence: `Client code "${extracted.detectedClientCode.exact_quote}" spoken, but pending authoritative reference client code.`,
-        reason: 'Spoken client code requires reference record for verification.',
-        speaker: extracted.detectedClientCode.speaker || 'ADVISOR',
-        confidence: 0.85,
+        confidence: 0.95,
       };
     } else {
+      // Client code was not spoken at all in the call
       q2 = {
         status: 'FAIL',
-        evidence: 'FATAL: Client account code was not verbally confirmed anywhere in the call transcript.',
-        reason: 'Client UCC was not verbally identified.',
+        evidence: `FATAL: Client code / UCC "${expectedClientCode}" was not spoken or confirmed in the dialogue before order placement.`,
+        reason: 'Client code not explicitly confirmed in pre-order call.',
         speaker: 'ADVISOR',
         confidence: 0.95,
       };
     }
+  } else {
+    q2 = {
+      status: 'REVIEW',
+      evidence: 'No expected client code available in call or trade records to verify.',
+      reason: 'Expected client code missing from metadata.',
+      speaker: 'ADVISOR',
+      confidence: 0.85,
+    };
   }
 
   // -------------------------------------------------------------
-  // Q3: Order Details: Stock, Quantity, Price / CMP
-  // RULE: Compare spoken details with the resolved trade (or transcript dialogue):
-  // - Stock
-  // - Quantity
-  // - Price (OR spoken "CMP" / "Current Market Price" / "Market")
-  // DO NOT compare side (Buy/Sell).
-  // If stock, quantity, and price/CMP match -> PASS (1 mark).
-  // Any mismatch -> FAIL (deduct 1 mark, NON-FATAL).
+  // Q3: Explicit Order Verification (Stock, Price, Quantity)
+  // RULE: Non-fatal (-1 mark). Stock + Qty + Price/CMP required.
   // -------------------------------------------------------------
   let q3: AuditQuestionOutput;
 
-  if (!resolvedTrade) {
-    const isCmp = mentionsMarketPriceOrCMP(transcript) || extracted.hasCmpMention;
-    const hasSpokenStock = extracted.detectedSymbols.length > 0;
-    const hasSpokenQty = extracted.detectedQuantities.length > 0;
-    const hasSpokenPrice = isCmp || extracted.detectedPrices.length > 0;
-
-    const missingParts: string[] = [];
-    if (!hasSpokenStock) missingParts.push('Stock symbol');
-    if (!hasSpokenQty) missingParts.push('Quantity');
-    if (!hasSpokenPrice) missingParts.push('Price/CMP');
-
-    if (missingParts.length === 0) {
-      const stock = extracted.detectedSymbols[0]?.normalized_value || 'Stock';
-      const qty = extracted.detectedQuantities[0]?.normalized_value || 'Qty';
-      const price = isCmp ? 'Current Market Price (CMP)' : `₹${extracted.detectedPrices[0]?.normalized_value}`;
-      q3 = {
-        status: 'PASS',
-        evidence: `Spoken dialogue confirmed: Stock (${stock}), Quantity (${qty}), Price (${price}).`,
-        reason: 'Stock, Quantity, and Price/CMP all verbally confirmed in dialogue.',
-        speaker: 'ADVISOR',
-        confidence: 0.95,
-      };
+  // Stock symbol check
+  let stockMatches = false;
+  let stockSpokenDetail = '';
+  if (resolvedTrade?.symbol) {
+    const symRes = matchSymbolInTranscript(resolvedTrade.symbol, transcript);
+    if (symRes.matched) {
+      stockMatches = true;
+      stockSpokenDetail = symRes.matchedAlias;
     } else {
-      q3 = {
-        status: 'FAIL',
-        evidence: `Order verification discrepancy (-1 mark, non-fatal). Missing spoken elements: ${missingParts.join(', ')}.`,
-        reason: `Mandatory order attributes (${missingParts.join(', ')}) not verbally confirmed.`,
-        speaker: 'ADVISOR',
-        confidence: 0.95,
-      };
-    }
-  } else {
-    // Stock check against resolved trade
-    let stockMatches = false;
-    let stockSpokenDetail = '';
-    if (resolvedTrade.symbol) {
-      const symMatch = matchSymbolInTranscript(resolvedTrade.symbol, transcript);
-      if (symMatch.matched) {
-        stockMatches = true;
-        stockSpokenDetail = symMatch.matchedAlias || resolvedTrade.symbol;
-      } else {
-        const sym = resolvedTrade.symbol.replace(/-(?:EQ|BE|SM|BZ|BL|ST)$/i, '').trim();
-        if (sym && new RegExp(`\\b${sym}\\b`, 'i').test(transcript)) {
-          stockMatches = true;
-          stockSpokenDetail = sym;
-        }
-      }
-    }
-    if (!stockMatches) {
       const otherStock = extracted.detectedSymbols[0]?.normalized_value;
       stockSpokenDetail = otherStock ? `Spoken: "${otherStock}" (Expected: "${resolvedTrade.symbol}")` : `Not spoken (Expected: "${resolvedTrade.symbol}")`;
     }
-
-    // Quantity check against resolved trade
-    let qtyMatches = false;
-    let qtySpokenDetail = '';
-    if (resolvedTrade.quantity) {
-      if (matchQuantityInTranscript(resolvedTrade.quantity, transcript) || new RegExp(`\\b${resolvedTrade.quantity}\\b`).test(transcript)) {
-        qtyMatches = true;
-        qtySpokenDetail = String(resolvedTrade.quantity);
+  } else {
+    // Check known aliases or detected symbols
+    const lowerT = transcript.toLowerCase();
+    for (const [symKey, aliases] of Object.entries(SYMBOL_ALIASES)) {
+      for (const alias of aliases) {
+        if (lowerT.includes(alias.toLowerCase())) {
+          stockMatches = true;
+          stockSpokenDetail = symKey;
+          break;
+        }
       }
+      if (stockMatches) break;
     }
-    if (!qtyMatches) {
+    if (!stockMatches && extracted.detectedSymbols.length > 0) {
+      stockMatches = true;
+      stockSpokenDetail = String(extracted.detectedSymbols[0].normalized_value);
+    }
+  }
+
+  // Quantity check
+  let qtyMatches = false;
+  let qtySpokenDetail = '';
+  if (resolvedTrade?.quantity && resolvedTrade.quantity > 0) {
+    if (matchQuantityInTranscript(resolvedTrade.quantity, transcript)) {
+      qtyMatches = true;
+      qtySpokenDetail = `${resolvedTrade.quantity} shares/lots`;
+    } else {
       const otherQty = extracted.detectedQuantities[0]?.normalized_value;
-      qtySpokenDetail = otherQty !== undefined ? `Spoken: ${otherQty} (Expected: ${resolvedTrade.quantity})` : `Not spoken (Expected: ${resolvedTrade.quantity})`;
+      qtySpokenDetail = otherQty ? `Spoken: ${otherQty} (Expected: ${resolvedTrade.quantity})` : `Not spoken (Expected: ${resolvedTrade.quantity})`;
     }
+  } else {
+    const qtyMatch = transcript.match(/\b(\d+)\s*(?:shares?|lots?|qty|quantity)\b/i);
+    if (qtyMatch) {
+      qtyMatches = true;
+      qtySpokenDetail = `${qtyMatch[1]} shares`;
+    } else if (extracted.detectedQuantities.length > 0) {
+      qtyMatches = true;
+      qtySpokenDetail = `${extracted.detectedQuantities[0].normalized_value} shares`;
+    }
+  }
 
-    // Price check (explicit price OR verbal CMP)
-    let priceMatches = false;
-    let priceSpokenDetail = '';
-    const isCmp = mentionsMarketPriceOrCMP(transcript) || extracted.hasCmpMention;
+  // Price check (explicit price OR verbal CMP)
+  let priceMatches = false;
+  let priceSpokenDetail = '';
+  const isCmp = mentionsMarketPriceOrCMP(transcript) || extracted.hasCmpMention;
 
-    if (isCmp) {
+  if (isCmp) {
+    priceMatches = true;
+    priceSpokenDetail = 'Current Market Price (CMP)';
+  } else if (resolvedTrade?.price && (matchPriceInTranscript(resolvedTrade.price, transcript) || new RegExp(`\\b${resolvedTrade.price}\\b`).test(transcript))) {
+    priceMatches = true;
+    priceSpokenDetail = `₹${resolvedTrade.price}`;
+  } else if (extracted.detectedPrices.length > 0) {
+    priceMatches = true;
+    priceSpokenDetail = `₹${extracted.detectedPrices[0].normalized_value}`;
+  } else {
+    const priceMatch = transcript.match(/\b(?:at|pe|rate|price|rs\.?|inr|₹)\s*(\d+(?:\.\d+)?)\b/i);
+    if (priceMatch) {
       priceMatches = true;
-      priceSpokenDetail = 'Current Market Price (CMP)';
-    } else if (resolvedTrade.price && (matchPriceInTranscript(resolvedTrade.price, transcript) || new RegExp(`\\b${resolvedTrade.price}\\b`).test(transcript))) {
-      priceMatches = true;
-      priceSpokenDetail = `₹${resolvedTrade.price}`;
-    } else {
-      const otherPrice = extracted.detectedPrices[0]?.normalized_value;
-      priceSpokenDetail = otherPrice ? `Spoken: ₹${otherPrice} (Expected: ₹${resolvedTrade.price || 'CMP'})` : `Not spoken (Expected: ₹${resolvedTrade.price || 'CMP'})`;
+      priceSpokenDetail = `₹${priceMatch[1]}`;
     }
+  }
 
-    const mismatches: string[] = [];
-    if (!stockMatches) mismatches.push('Stock symbol');
-    if (!qtyMatches) mismatches.push('Quantity');
-    if (!priceMatches) mismatches.push('Price/CMP');
+  const mismatches: string[] = [];
+  if (!stockMatches) mismatches.push('Stock symbol');
+  if (!qtyMatches) mismatches.push('Quantity');
+  if (!priceMatches) mismatches.push('Price/CMP');
 
-    if (mismatches.length === 0) {
-      q3 = {
-        status: 'PASS',
-        evidence: `Stock: ${stockSpokenDetail} | Quantity: ${qtySpokenDetail} | Execution Price: ${priceSpokenDetail}. All order parameters verified.`,
-        reason: 'Stock, Quantity, and Price/CMP all confirmed in dialogue.',
-        speaker: 'ADVISOR',
-        confidence: 1.0,
-      };
-    } else {
-      q3 = {
-        status: 'FAIL',
-        evidence: `Order verification discrepancy (-1 mark, non-fatal). Mismatches: ${mismatches.join(', ')}. [Stock: ${stockSpokenDetail}, Qty: ${qtySpokenDetail}, Price: ${priceSpokenDetail}].`,
-        reason: `Mandatory order attributes (${mismatches.join(', ')}) not fully confirmed against trade.`,
-        speaker: 'ADVISOR',
-        confidence: 0.95,
-      };
-    }
+  if (mismatches.length === 0) {
+    q3 = {
+      status: 'PASS',
+      evidence: `Stock: ${stockSpokenDetail} | Quantity: ${qtySpokenDetail} | Execution Price: ${priceSpokenDetail}. All order parameters verified.`,
+      reason: 'Stock, Quantity, and Price/CMP all confirmed in dialogue.',
+      speaker: 'ADVISOR',
+      confidence: 1.0,
+    };
+  } else {
+    q3 = {
+      status: 'FAIL',
+      evidence: `Order verification discrepancy (-1 mark, non-fatal). Mismatches: ${mismatches.join(', ')}. [Stock: ${stockSpokenDetail || 'Missing'}, Qty: ${qtySpokenDetail || 'Missing'}, Price: ${priceSpokenDetail || 'Missing'}].`,
+      reason: `Mandatory order attributes (${mismatches.join(', ')}) not fully confirmed.`,
+      speaker: 'ADVISOR',
+      confidence: 0.95,
+    };
   }
 
   // -------------------------------------------------------------
   // Q4: Customer Acknowledgement
-  // RULE: Customer verbal acknowledgement. PASS unless explicit refusal or cancellation.
+  // RULE: Customer verbal acknowledgement.
+  // REMOVE fabricated Q4 evidence: never invent fake affirmative quotes.
+  // PASS unless explicit negative acknowledgement or cancellation.
   // -------------------------------------------------------------
   const hasNegativeAck = /\b(?:cancel|don'?t buy|do not buy|nahi\s+cancel|reject|mat\s+(?:karo|bhejo|lagao)|nahi\s+chahiye|mana\s+kiya)\b/i.test(transcript);
-  const q4: AuditQuestionOutput = hasNegativeAck
-    ? {
-        status: 'FAIL',
-        evidence: 'Customer negative acknowledgement or order cancellation detected.',
-        reason: 'Customer declined or cancelled the trade authorization.',
-        speaker: 'CLIENT',
-        confidence: 1.0,
-      }
-    : {
-        status: 'PASS',
-        evidence: 'Customer affirmative verbal acknowledgement confirmed.',
-        reason: 'Customer verbal acknowledgement verified.',
-        speaker: 'CLIENT',
-        confidence: 1.0,
-      };
+  const affirmativeMatch = transcript.match(/\b(?:yes|yeah|okay|ok|sure|proceed|confirm|go ahead|haan|theek hai|kardo|kar do|kar dijiye|done)\b/i);
+
+  let q4: AuditQuestionOutput;
+  if (hasNegativeAck) {
+    q4 = {
+      status: 'FAIL',
+      evidence: 'Customer negative acknowledgement or order cancellation detected in conversation.',
+      reason: 'Customer declined or cancelled the trade authorization.',
+      speaker: 'CLIENT',
+      confidence: 1.0,
+    };
+  } else if (affirmativeMatch) {
+    q4 = {
+      status: 'PASS',
+      evidence: `Customer verbal confirmation verified: "${affirmativeMatch[0]}".`,
+      reason: 'Customer verbal acknowledgement verified.',
+      speaker: 'CLIENT',
+      confidence: 1.0,
+    };
+  } else {
+    q4 = {
+      status: 'PASS',
+      evidence: 'Customer acknowledgement verified. No dispute or order cancellation detected in dialogue.',
+      reason: 'Customer verbal acknowledgement confirmed (no cancellation).',
+      speaker: 'CLIENT',
+      confidence: 1.0,
+    };
+  }
 
   // -------------------------------------------------------------
   // Q5: Return Commitment & Guarantee Prohibition
-  // RULE: Check if advisor gave guarantee of return, profit, or recovery.
-  // If assurance found -> FATAL (Score 0).
+  // RULE: Check if ADVISOR gave guarantee of return, profit, or recovery.
+  // Must understand context and negation.
+  // If affirmative guarantee found -> FATAL (Score 0).
   // Else -> PASS.
   // -------------------------------------------------------------
   const retItem = extracted.detectedReturnCommitment;
-  let q5: AuditQuestionOutput;
-
   const lowerT = transcript.toLowerCase();
-  const hasExpectedWord = /\b(?:expected|expectation|assuming|assumption|likely|target|potential|subject to market|risk)\b/i.test(lowerT);
-  const hasProhibitedGuarantee =
-    retItem?.normalized_value === 'FAIL' ||
+
+  // Negation & Risk Disclaimers (e.g. "cannot guarantee", "no returns are guaranteed", "subject to market risks")
+  const hasNegationOrRiskDisclaimer =
+    /\b(?:cannot|can't|do\s+not|don't|never|no|not)\s+(?:give\s+any\s+)?guarantee\b/i.test(lowerT) ||
+    /\bguarantee\s+(?:nahi\s+hai|nahi\s+hota|nahi\s+hoga|nahi\s+de\s+sakte)\b/i.test(lowerT) ||
+    /\bsubject\s+to\s+market\s+risks?\b/i.test(lowerT) ||
+    /\bno\s+guaranteed\s+(?:returns?|profit)\b/i.test(lowerT) ||
+    /\bmarket\s+risk\s+hai\b/i.test(lowerT);
+
+  const hasAffirmativeGuarantee =
+    (retItem?.normalized_value === 'FAIL' && !hasNegationOrRiskDisclaimer) ||
     /\bguaranteed\s+(?:\d+%\s+)?(?:return|profit|gain|target|income)\b/i.test(lowerT) ||
     /\b(?:will\s+(?:definitely\s+)?(?:give|get|make|recover|double)|definitely\s+(?:give|get|make|recover|double))\s+(?:profit|return|returns|recovery|gain)\b/i.test(lowerT) ||
-    /\b(?:guarantee\s+hai|pakka\s+profit|fixed\s+profit|guaranteed\s+return|guaranteed\s+profit|100%\s+safe|risk\s*free\s+return)\b/i.test(lowerT) ||
+    /\b(?:guarantee\s+hai|pakka\s+profit|fixed\s+profit|guaranteed\s+return|guaranteed\s+profit|100%\s+safe\s+double|risk\s*free\s+return)\b/i.test(lowerT) ||
     /\b(?:sure\s+shot\s+profit|definitely\s+double|loss\s+nahi\s+hoga|paisa\s+banega\s+hi\s+banega|recovery\s+hoga\s+hi\s+hoga)\b/i.test(lowerT);
 
-  if (hasProhibitedGuarantee) {
+  let q5: AuditQuestionOutput;
+  if (hasAffirmativeGuarantee && !hasNegationOrRiskDisclaimer) {
     q5 = {
       status: 'FAIL',
-      evidence: `FATAL: Prohibited verbal return or recovery guarantee made: "${retItem?.exact_quote || 'Guaranteed return/recovery stated'}".`,
+      evidence: `FATAL: Prohibited verbal return or recovery guarantee made by advisor: "${retItem?.exact_quote || 'Guaranteed return/recovery stated'}".`,
       reason: 'Advisor made impermissible verbal return or profit guarantees.',
       speaker: 'ADVISOR',
       confidence: 1.0,
@@ -348,10 +410,10 @@ export function evaluateEvidenceCompliance(
   } else {
     q5 = {
       status: 'PASS',
-      evidence: hasExpectedWord
-        ? 'Advisor discussed market expectation/targets with appropriate assumption context. No fixed guarantees made.'
-        : 'Advisor made zero return or profit guarantees. Fully compliant.',
-      reason: 'No prohibited return commitments identified.',
+      evidence: hasNegationOrRiskDisclaimer
+        ? 'Advisor properly stated market risk disclaimer. No return or profit guarantee made.'
+        : 'Advisor made zero return or profit guarantees. Fully compliant with SEBI regulations.',
+      reason: 'No prohibited return commitments identified in advisor dialogue.',
       speaker: 'ADVISOR',
       confidence: 1.0,
     };

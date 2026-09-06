@@ -328,3 +328,166 @@ export async function sendScorecardEmail(options: EmailDispatchOptions): Promise
     };
   }
 }
+
+export interface TradeConfirmationOptions {
+  callId: number;
+  recordingName?: string;
+  callerName?: string;
+  clientCode?: string;
+  callingNumber?: string;
+  registeredNumber?: string;
+  callDate?: string;
+  transcriptSnippet?: string;
+  candidateTrades?: any[];
+  recipientEmail?: string;
+  smtpConfig?: SmtpConfig;
+}
+
+export interface TradeConfirmationResult {
+  success: boolean;
+  status: 'sent' | 'failed' | 'logged';
+  messageId?: string;
+  errorMessage?: string;
+}
+
+/**
+ * Renders HTML template for Missing / Unresolved Trade Confirmation
+ */
+export function renderTradeConfirmationEmailHtml(options: TradeConfirmationOptions): string {
+  const {
+    callId,
+    recordingName = 'Unknown Recording',
+    callerName = 'Unassigned Advisor',
+    clientCode = 'Unknown UCC',
+    callingNumber = 'Unknown',
+    registeredNumber = 'Unknown',
+    callDate = new Date().toISOString().slice(0, 10),
+    transcriptSnippet = '',
+    candidateTrades = [],
+  } = options;
+
+  const candidateRows =
+    candidateTrades.length > 0
+      ? candidateTrades
+          .map(
+            (c: any, i: number) => `
+        <tr>
+          <td style="border: 1px solid #cbd5e1; padding: 6px 8px;">#${i + 1} (${c.trade?.external_id || c.trade?.id || 'Trade'})</td>
+          <td style="border: 1px solid #cbd5e1; padding: 6px 8px;">${c.trade?.symbol || '—'}</td>
+          <td style="border: 1px solid #cbd5e1; padding: 6px 8px;">${c.trade?.quantity || '—'} @ ₹${c.trade?.price || 'CMP'}</td>
+          <td style="border: 1px solid #cbd5e1; padding: 6px 8px;">${((c.score || 0) * 100).toFixed(0)}% (${(c.reasons || []).join(', ') || 'Partial match'})</td>
+        </tr>
+      `
+          )
+          .join('')
+      : `<tr><td colspan="4" style="border: 1px solid #cbd5e1; padding: 8px; text-align: center; color: #64748b;">No correlated trade candidates found in trade book.</td></tr>`;
+
+  return `
+  <!DOCTYPE html>
+  <html>
+  <head>
+    <meta charset="utf-8">
+    <title>Action Required: Missing Trade Confirmation</title>
+  </head>
+  <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background-color: #f8fafc; padding: 20px; margin: 0;">
+    <div style="max-width: 650px; margin: 0 auto; background-color: #ffffff; border-radius: 8px; border: 1px solid #cbd5e1; overflow: hidden;">
+      <div style="background-color: #b45309; color: #ffffff; padding: 14px 20px; font-weight: bold; font-size: 15px;">
+        ⚠️ Action Required: Pre-Order Call Missing Exact Trade Confirmation
+      </div>
+      <div style="padding: 20px;">
+        <p style="font-size: 13px; color: #334155; margin-top: 0;">
+          The ADAM-AR Automated Compliance Engine identified actionable <b>PRE-ORDER</b> intent in Call <b>#${callId}</b>, but <b>could not find a verified, conclusive trade match</b> in the trade book repository. Per SEBI regulatory guidelines, pre-order compliance audits are paused until this trade is confirmed.
+        </p>
+
+        <table style="width: 100%; border-collapse: collapse; font-size: 12px; margin-bottom: 16px;">
+          <tr>
+            <th style="border: 1px solid #cbd5e1; background-color: #f1f5f9; padding: 6px 10px; text-align: left; width: 35%;">Call ID / File</th>
+            <td style="border: 1px solid #cbd5e1; padding: 6px 10px;">Call #${callId} (${recordingName})</td>
+          </tr>
+          <tr>
+            <th style="border: 1px solid #cbd5e1; background-color: #f1f5f9; padding: 6px 10px; text-align: left;">Advisor / Caller</th>
+            <td style="border: 1px solid #cbd5e1; padding: 6px 10px; font-weight: bold;">${callerName}</td>
+          </tr>
+          <tr>
+            <th style="border: 1px solid #cbd5e1; background-color: #f1f5f9; padding: 6px 10px; text-align: left;">Client UCC / Phone</th>
+            <td style="border: 1px solid #cbd5e1; padding: 6px 10px; font-family: monospace;">${clientCode} / CLI: ${callingNumber} (Reg: ${registeredNumber})</td>
+          </tr>
+          <tr>
+            <th style="border: 1px solid #cbd5e1; background-color: #f1f5f9; padding: 6px 10px; text-align: left;">Date of Call</th>
+            <td style="border: 1px solid #cbd5e1; padding: 6px 10px;">${callDate}</td>
+          </tr>
+        </table>
+
+        ${
+          transcriptSnippet
+            ? `<div style="background-color: #fffbeb; border: 1px solid #fef3c7; padding: 10px; border-radius: 6px; font-size: 12px; color: #92400e; margin-bottom: 16px;">
+          <strong>Relevant Dialogue Snippet:</strong><br/>
+          <em>"${transcriptSnippet}"</em>
+        </div>`
+            : ''
+        }
+
+        <h4 style="font-size: 13px; color: #1e293b; margin-bottom: 6px;">Close / Ambiguous Candidates Evaluated:</h4>
+        <table style="width: 100%; border-collapse: collapse; font-size: 11px; margin-bottom: 16px;">
+          <thead>
+            <tr style="background-color: #f1f5f9; text-align: left;">
+              <th style="border: 1px solid #cbd5e1; padding: 6px 8px;">Trade Ref</th>
+              <th style="border: 1px solid #cbd5e1; padding: 6px 8px;">Symbol</th>
+              <th style="border: 1px solid #cbd5e1; padding: 6px 8px;">Qty &amp; Price</th>
+              <th style="border: 1px solid #cbd5e1; padding: 6px 8px;">Match Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${candidateRows}
+          </tbody>
+        </table>
+
+        <div style="background-color: #f8fafc; border: 1px solid #e2e8f0; padding: 12px; border-radius: 6px; font-size: 11px; color: #64748b;">
+          <strong>Resolution Instructions:</strong><br/>
+          1. If the trade was executed under a different UCC or terminal, please perform manual trade correlation in the ADAM-AR dashboard.<br/>
+          2. If the order was cancelled or never punched, verify the order cancellation record.<br/>
+          3. Unresolved trades will remain in <code>REVIEW / PENDING_CONFIRMATION</code> to avoid false audit penalties.
+        </div>
+      </div>
+      <div style="background-color: #f1f5f9; padding: 10px 20px; font-size: 11px; color: #94a3b8; text-align: center;">
+        ADAM-AR Compliance Assurance • Regulatory Pre-Order Intelligence
+      </div>
+    </div>
+  </body>
+  </html>
+  `;
+}
+
+/**
+ * Dispatches trade confirmation request email when a pre-order call has no exact trade match.
+ */
+export async function CALL_MAIL_CONFIRMATION(options: TradeConfirmationOptions): Promise<TradeConfirmationResult> {
+  const recipient = options.recipientEmail || process.env.COMPLIANCE_HEAD_EMAIL || DEFAULT_SENDER_EMAIL;
+  const html = renderTradeConfirmationEmailHtml(options);
+  const subject = `[ACTION REQUIRED] Missing Trade Confirmation for Pre-Order Call #${options.callId} (${options.callerName || 'Advisor'})`;
+
+  try {
+    const transporter = createMailTransporter(options.smtpConfig);
+    const from = options.smtpConfig?.from || options.smtpConfig?.user || DEFAULT_SENDER_EMAIL;
+    const info = await transporter.sendMail({
+      from: `"ADAM-AR Compliance" <${from}>`,
+      to: recipient,
+      cc: FATAL_CC_EMAIL,
+      subject,
+      html,
+    });
+
+    return {
+      success: true,
+      status: 'sent',
+      messageId: info.messageId,
+    };
+  } catch (err: any) {
+    // If SMTP is unconfigured, return logged status so pipeline continues smoothly
+    return {
+      success: false,
+      status: 'logged',
+      errorMessage: err.message || 'SMTP not configured or failed to deliver.',
+    };
+  }
+}

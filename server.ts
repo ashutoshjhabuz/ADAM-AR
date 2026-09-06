@@ -30,11 +30,11 @@ import {
   scoreTradeCandidates,
   evaluateMatchingDecision,
 } from './server/matcher';
-import { classifyCallIntent } from './server/classifier';
+import { classifyCallIntent, classifyCallIntentWithAI } from './server/classifier';
 import { evaluateDeterministicQ1 } from './server/q1-evaluator';
 import { evaluateDeterministicQ3 } from './server/q3-evaluator';
 import { transcribeWithMultiPassEnsemble } from './server/ensemble-transcriber';
-import { sendScorecardEmail, testSmtpConnection, createMailTransporter } from './server/email-service';
+import { sendScorecardEmail, testSmtpConnection, createMailTransporter, CALL_MAIL_CONFIRMATION } from './server/email-service';
 import { executeDualAsrAndDeterministicAudit } from './server/dual-asr-pipeline';
 import {
   DEFAULT_SENDER_EMAIL,
@@ -61,7 +61,7 @@ import {
   type UnifiedAuditOutput,
   type AuditQuestionOutput,
 } from './server/scoring-engine';
-import { evaluateEvidenceCompliance } from './server/audit-evaluator';
+import { evaluateEvidenceCompliance, verifyAuditEligibility } from './server/audit-evaluator';
 import { transcribeAudioFile } from './server/asr-engine';
 
 const PORT = 3000;
@@ -501,6 +501,24 @@ try {
 } catch {}
 try {
   sqlite.exec('ALTER TABLE scorecards ADD COLUMN resolved_trade_id INTEGER;');
+} catch {}
+try {
+  sqlite.exec('ALTER TABLE jobs ADD COLUMN original_error TEXT;');
+} catch {}
+try {
+  sqlite.exec('ALTER TABLE calls ADD COLUMN preorder_speaker TEXT;');
+} catch {}
+try {
+  sqlite.exec('ALTER TABLE calls ADD COLUMN preorder_timestamp TEXT;');
+} catch {}
+try {
+  sqlite.exec('ALTER TABLE calls ADD COLUMN pipeline_stage TEXT;');
+} catch {}
+try {
+  sqlite.exec('ALTER TABLE calls ADD COLUMN pipeline_status TEXT;');
+} catch {}
+try {
+  sqlite.exec('ALTER TABLE calls ADD COLUMN pipeline_error TEXT;');
 } catch {}
 
 // Initialize Default Settings
@@ -1709,9 +1727,148 @@ function runMatchingForCall(callId: number): MatchRecord | null {
 
 // -------------------------------------------------------------
 // Real Persistent Queue Worker Engine with Multi-Job Concurrency
+// & Fault-Tolerant Circuit Breakers & Watchdog
 // -------------------------------------------------------------
+class CircuitBreaker {
+  public failureCount = 0;
+  public lastFailureTime = 0;
+  public readonly threshold = 5;
+  public readonly cooldownMs = 60000;
+
+  recordSuccess() {
+    this.failureCount = 0;
+  }
+
+  recordFailure() {
+    this.failureCount++;
+    this.lastFailureTime = Date.now();
+  }
+
+  isOpen(): boolean {
+    if (this.failureCount >= this.threshold) {
+      if (Date.now() - this.lastFailureTime > this.cooldownMs) {
+        // Half-open: allow one probe
+        this.failureCount = Math.floor(this.threshold / 2);
+        return false;
+      }
+      return true;
+    }
+    return false;
+  }
+
+  getCooldownRemainingSeconds(): number {
+    if (!this.isOpen()) return 0;
+    const remaining = Math.max(0, this.cooldownMs - (Date.now() - this.lastFailureTime));
+    return Math.ceil(remaining / 1000);
+  }
+
+  reset() {
+    this.failureCount = 0;
+    this.lastFailureTime = 0;
+  }
+}
+
+export const groqCircuitBreaker = new CircuitBreaker();
+export const geminiCircuitBreaker = new CircuitBreaker();
+
 let activeWorkerCount = 0;
 const MAX_CONCURRENT_WORKERS = 3;
+
+/**
+ * Pipeline Watchdog: runs every 20s to detect stuck jobs with expired leases
+ * Marks them as AI_TIMEOUT if max attempts reached or retries with exponential backoff.
+ */
+function startPipelineWatchdog() {
+  setInterval(() => {
+    try {
+      const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
+      const stuckJobs = sqlite
+        .prepare(`
+          SELECT * FROM jobs
+          WHERE status = 'processing' AND lease_until IS NOT NULL AND lease_until < ?
+        `)
+        .all(now) as any[];
+
+      for (const j of stuckJobs) {
+        addLog('warning', 'WATCHDOG_LEASE_EXPIRED', `Job #${j.id} (${j.job_type}) lease expired. Attempt ${j.attempts}/${j.max_attempts}.`);
+        if (j.attempts < j.max_attempts) {
+          const backoff = 15000 * Math.pow(2, j.attempts);
+          const nextAvail = new Date(Date.now() + backoff).toISOString().replace('T', ' ').slice(0, 19);
+          sqlite
+            .prepare(`
+              UPDATE jobs SET
+                status = 'queued', available_at = ?, locked_at = NULL, locked_by = NULL,
+                last_error = 'AI_TIMEOUT: Worker lease expired. Auto-recovering.',
+                original_error = COALESCE(original_error, 'AI_TIMEOUT: Worker lease expired.'),
+                updated_at = ?
+              WHERE id = ?
+            `)
+            .run(nextAvail, now, j.id);
+        } else {
+          sqlite
+            .prepare(`
+              UPDATE jobs SET
+                status = 'failed', locked_at = NULL, locked_by = NULL,
+                last_error = 'AI_TIMEOUT: Maximum processing lease attempts exceeded.',
+                original_error = COALESCE(original_error, 'AI_TIMEOUT: Lease timeout.'),
+                updated_at = ?
+              WHERE id = ?
+            `)
+            .run(now, j.id);
+
+          if (j.job_type === 'transcribe') {
+            sqlite
+              .prepare(`
+                UPDATE calls SET
+                  status = 'failed',
+                  pipeline_status = 'failed',
+                  pipeline_error = 'AI_TIMEOUT: Processing exceeded maximum lease duration',
+                  updated_at = ?
+                WHERE id = ?
+              `)
+              .run(now, j.entity_id);
+          }
+        }
+      }
+
+      // Check if any queued jobs can be picked up
+      const queuedCount = (sqlite.prepare("SELECT COUNT(*) as c FROM jobs WHERE status = 'queued' AND (available_at IS NULL OR available_at <= ?)").get(now) as any)?.c || 0;
+      if (queuedCount > 0 && activeWorkerCount < MAX_CONCURRENT_WORKERS) {
+        setImmediate(() => claimAndProcessNextJob());
+      }
+    } catch (err: any) {
+      console.error('Watchdog cycle notice:', err.message);
+    }
+  }, 20000);
+}
+
+/**
+ * Boot-up recovery: checks for orphaned processing jobs from a previous server cycle
+ */
+function recoverStuckJobsOnBoot() {
+  try {
+    const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
+    const stuck = sqlite.prepare("SELECT COUNT(*) as c FROM jobs WHERE status = 'processing'").get() as { c: number } | undefined;
+    if (stuck && stuck.c > 0) {
+      sqlite
+        .prepare(`
+          UPDATE jobs SET
+            status = 'queued', available_at = ?, locked_at = NULL, locked_by = NULL,
+            last_error = 'RECOVERED_ON_BOOT: Server was restarted during processing.',
+            original_error = COALESCE(original_error, 'RECOVERED_ON_BOOT'),
+            updated_at = ?
+          WHERE status = 'processing'
+        `)
+        .run(now, now);
+      addLog('info', 'BOOT_RECOVERY', `Recovered ${stuck.c} in-flight job(s) from previous server run.`);
+    }
+  } catch (err: any) {
+    console.error('Boot recovery notice:', err.message);
+  }
+}
+
+recoverStuckJobsOnBoot();
+startPipelineWatchdog();
 
 async function claimAndProcessNextJob(): Promise<boolean> {
   if (activeWorkerCount >= MAX_CONCURRENT_WORKERS) return false;
@@ -1769,7 +1926,15 @@ async function claimAndProcessNextJob(): Promise<boolean> {
       const call = sqlite.prepare('SELECT * FROM calls WHERE id = ?').get(job.entity_id) as unknown as CallRecord | undefined;
       if (!call) throw new Error(`Call #${job.entity_id} not found.`);
 
+      // Update call pipeline stage
+      sqlite.prepare("UPDATE calls SET pipeline_stage = 'transcribing', pipeline_status = 'processing', updated_at = ? WHERE id = ?").run(now, call.id);
+
       addLog('info', 'WORKER_TRANSCRIBE_START', `Executing Groq Whisper Large-v3 High-Speed ASR for Call #${call.id} (${call.recording_name}).`);
+
+      if (groqCircuitBreaker.isOpen()) {
+        const remaining = groqCircuitBreaker.getCooldownRemainingSeconds();
+        throw new Error(`CIRCUIT_BREAKER_OPEN: Groq API in cooldown (${remaining}s remaining) due to consecutive upstream failures.`);
+      }
 
       const allTrades = sqlite.prepare('SELECT * FROM trades').all() as unknown as TradeRecord[];
       const candidates = scoreTradeCandidates(call, allTrades);
@@ -1787,12 +1952,14 @@ async function claimAndProcessNextJob(): Promise<boolean> {
           process.env.GEMINI_API_KEY,
           matchedTrade
         );
+        groqCircuitBreaker.recordSuccess();
         transcript = asrRes.transcript;
         rawTranscript = asrRes.rawTranscript;
         model = asrRes.modelUsed;
         detectedDuration = Math.round(asrRes.durationSeconds || 0);
         addLog('info', 'ASR_COMPLETE', `ASR complete for Call #${call.id} using ${model}. Duration: ${detectedDuration}s.`);
       } catch (asrErr: unknown) {
+        groqCircuitBreaker.recordFailure();
         addLog('warning', 'ASR_FALLBACK', `Primary ASR encountered notice: ${(asrErr as Error).message}. Attempting fallback.`);
         const fallbackRes = await transcribeWithGroq(call.storage_path || '', call.recording_name);
         transcript = fallbackRes.transcript;
@@ -1800,9 +1967,21 @@ async function claimAndProcessNextJob(): Promise<boolean> {
         model = fallbackRes.model;
       }
 
-      // Intent & Category Classification Step (pre_order vs regular vs scrap)
+      // Intent & Category Classification Step (Scrap-first, AI semantic classification, actionable order intent)
+      sqlite.prepare("UPDATE calls SET pipeline_stage = 'classifying', updated_at = ? WHERE id = ?").run(now, call.id);
       const callDuration = call.duration_seconds || detectedDuration;
-      const classification = classifyCallIntent(transcript, callDuration);
+
+      let classification;
+      try {
+        classification = await classifyCallIntentWithAI(
+          transcript,
+          callDuration,
+          getGroqKey(),
+          process.env.GEMINI_API_KEY
+        );
+      } catch {
+        classification = classifyCallIntent(transcript, callDuration);
+      }
 
       sqlite
         .prepare(`
@@ -1810,7 +1989,8 @@ async function claimAndProcessNextJob(): Promise<boolean> {
             transcript = ?, transcript_raw = ?, transcript_model = ?,
             duration_seconds = CASE WHEN duration_seconds > 0 THEN duration_seconds ELSE ? END,
             call_type = ?, preorder_confidence = ?, preorder_evidence = ?,
-            status = 'transcribed', updated_at = ?
+            preorder_speaker = ?, preorder_timestamp = ?,
+            pipeline_stage = 'matching', status = 'transcribed', updated_at = ?
           WHERE id = ?
         `)
         .run(
@@ -1821,17 +2001,20 @@ async function claimAndProcessNextJob(): Promise<boolean> {
           classification.call_type,
           classification.confidence,
           classification.evidence,
+          classification.evidence_speaker || 'UNKNOWN',
+          classification.evidence_timestamp || '0:00',
           now,
           call.id
         );
 
-      addLog('info', 'WORKER_TRANSCRIBE_COMPLETE', `Transcription and classification finished for Call #${call.id} (${classification.call_type}).`);
+      addLog('info', 'WORKER_TRANSCRIBE_COMPLETE', `Transcription and AI classification finished for Call #${call.id} (${classification.call_type}).`);
 
       // Only pre_order calls enter trade matching & compliance audit workflow
       if (classification.call_type === 'pre_order') {
         runMatchingForCall(call.id);
         enqueueJob('audit', call.id, `call:${call.id}:audit`);
       } else {
+        sqlite.prepare("UPDATE calls SET pipeline_stage = 'completed', pipeline_status = 'completed', updated_at = ? WHERE id = ?").run(now, call.id);
         addLog('info', 'CALL_FILTERED', `Call #${call.id} classified as "${classification.call_type}". Bypassing trade compliance audit.`);
       }
 
@@ -1839,14 +2022,7 @@ async function claimAndProcessNextJob(): Promise<boolean> {
       const call = sqlite.prepare('SELECT * FROM calls WHERE id = ?').get(job.entity_id) as unknown as CallRecord | undefined;
       if (!call) throw new Error(`Call #${job.entity_id} not found.`);
 
-      // MANDATE: Only pre-order calls enter trade compliance auditing
-      if (call.call_type !== 'pre_order') {
-        addLog('info', 'AUDIT_SKIPPED', `Call #${call.id} classified as "${call.call_type}". Only pre-order calls enter trade audit.`);
-        sqlite.prepare("UPDATE calls SET status = 'regular_closed', updated_at = ? WHERE id = ?").run(now, call.id);
-        sqlite.prepare("UPDATE jobs SET status = 'completed', locked_at = NULL, locked_by = NULL, updated_at = ? WHERE id = ?").run(now, job.id);
-        setSettingValue('pipeline_stage', 'idle');
-        return true;
-      }
+      sqlite.prepare("UPDATE calls SET pipeline_stage = 'auditing', pipeline_status = 'processing', updated_at = ? WHERE id = ?").run(now, call.id);
 
       const existingAudit = sqlite.prepare('SELECT id, reviewed_by FROM audits WHERE call_id = ?').get(call.id) as { id: number; reviewed_by?: number } | undefined;
       if (existingAudit?.reviewed_by) {
@@ -1858,12 +2034,58 @@ async function claimAndProcessNextJob(): Promise<boolean> {
       // Resolve authoritative trade context without array fallbacks
       const { resolvedTrade, candidateTrades, clientCode } = resolveAuthoritativeContextForCall(call.id);
 
+      // HARD AUDIT ELIGIBILITY GATE:
+      // Enforces: NO Advisor -> NO audit, NO Client ID/UCC -> NO audit, NO exact trade -> NO audit, ONLY confirmed pre_order calls
+      const eligibility = verifyAuditEligibility(call, resolvedTrade, call.transcript);
+      if (!eligibility.eligible) {
+        addLog('warning', 'AUDIT_GATE_REJECTED', `Call #${call.id} rejected by Audit Eligibility Gate (${eligibility.gateCode}): ${eligibility.reason}`);
+
+        if (eligibility.gateCode === 'NO_EXACT_TRADE') {
+          // MANDATE: MISSING exact trade -> CALL_MAIL_CONFIRMATION(). DO NOT audit unresolved trades.
+          try {
+            await CALL_MAIL_CONFIRMATION({
+              callId: call.id,
+              recordingName: call.recording_name,
+              callerName: call.caller_name || '',
+              clientCode: clientCode || call.client || '',
+              callingNumber: call.calling_number || call.phone_number || '',
+              registeredNumber: call.registered_number || '',
+              callDate: call.call_date || '',
+              transcriptSnippet: (call.transcript || '').slice(0, 300),
+              candidateTrades,
+            });
+            addLog('info', 'CALL_MAIL_CONFIRMATION_SENT', `Missing exact trade confirmation alert dispatched for Pre-Order Call #${call.id}.`);
+          } catch (mailErr: any) {
+            addLog('warning', 'CALL_MAIL_CONFIRMATION_FAILED', `Failed to dispatch confirmation email: ${mailErr.message}`);
+          }
+
+          sqlite.prepare("UPDATE calls SET status = 'unmatched_pending_confirmation', pipeline_stage = 'review', pipeline_status = 'review', updated_at = ? WHERE id = ?").run(now, call.id);
+        } else if (eligibility.gateCode === 'NOT_PRE_ORDER') {
+          sqlite.prepare("UPDATE calls SET status = 'regular_closed', pipeline_stage = 'completed', pipeline_status = 'completed', updated_at = ? WHERE id = ?").run(now, call.id);
+        } else {
+          sqlite.prepare("UPDATE calls SET status = 'review', pipeline_stage = 'review', pipeline_status = 'review', updated_at = ? WHERE id = ?").run(now, call.id);
+        }
+
+        // Complete job cleanly so pipeline doesn't infinite-loop on ineligible calls
+        sqlite.prepare("UPDATE jobs SET status = 'completed', locked_at = NULL, locked_by = NULL, updated_at = ? WHERE id = ?").run(now, job.id);
+        setSettingValue('pipeline_stage', 'idle');
+        return true;
+      }
+
       addLog(
         'info',
         'WORKER_AUDIT_START',
         `Auditing Call #${call.id} against SEBI compliance rubric (Resolved Trade: ${resolvedTrade ? `#${resolvedTrade.id} (${resolvedTrade.symbol})` : 'NONE'}, Client: ${clientCode}).`
       );
-      const auditResult = await auditWithGroq(call, resolvedTrade, clientCode);
+
+      let auditResult;
+      try {
+        auditResult = await auditWithGroq(call, resolvedTrade, clientCode);
+        groqCircuitBreaker.recordSuccess();
+      } catch (auditErr: any) {
+        groqCircuitBreaker.recordFailure();
+        throw auditErr;
+      }
 
       let auditId = existingAudit?.id;
 
@@ -1895,6 +2117,7 @@ async function claimAndProcessNextJob(): Promise<boolean> {
       }
 
       calculateScoreAndPersistScorecard(auditId!, call, resolvedTrade, auditResult, null, null, clientCode);
+      sqlite.prepare("UPDATE calls SET pipeline_stage = 'completed', pipeline_status = 'completed', updated_at = ? WHERE id = ?").run(now, call.id);
 
     } else if (job.job_type === 'score') {
       const audit = sqlite.prepare('SELECT * FROM audits WHERE id = ?').get(job.entity_id) as unknown as AuditRecord | undefined;
@@ -1931,6 +2154,10 @@ async function claimAndProcessNextJob(): Promise<boolean> {
     const errorMsg = (err as Error).message;
     addLog('error', 'WORKER_JOB_FAILED', `Queue job failed: ${errorMsg}`);
 
+    if (errorMsg.includes('groq') || errorMsg.includes('Groq') || errorMsg.includes('429') || errorMsg.includes('503')) {
+      groqCircuitBreaker.recordFailure();
+    }
+
     if (claimedJobId) {
       const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
       const attempts = (currentJob?.attempts || 0) + 1;
@@ -1944,18 +2171,37 @@ async function claimAndProcessNextJob(): Promise<boolean> {
         sqlite
           .prepare(`
             UPDATE jobs SET
-              status = 'queued', available_at = ?, locked_at = NULL, locked_by = NULL, last_error = ?, updated_at = ?
+              status = 'queued', available_at = ?, locked_at = NULL, locked_by = NULL,
+              last_error = ?,
+              original_error = COALESCE(original_error, ?),
+              updated_at = ?
             WHERE id = ?
           `)
-          .run(nextAvailableAt, errorMsg, now, claimedJobId);
+          .run(nextAvailableAt, errorMsg, errorMsg, now, claimedJobId);
       } else {
         sqlite
           .prepare(`
             UPDATE jobs SET
-              status = 'failed', locked_at = NULL, locked_by = NULL, last_error = ?, updated_at = ?
+              status = 'failed', locked_at = NULL, locked_by = NULL,
+              last_error = ?,
+              original_error = COALESCE(original_error, ?),
+              updated_at = ?
             WHERE id = ?
           `)
-          .run(errorMsg, now, claimedJobId);
+          .run(errorMsg, errorMsg, now, claimedJobId);
+
+        if (currentJob?.job_type === 'transcribe') {
+          sqlite
+            .prepare(`
+              UPDATE calls SET
+                status = 'failed',
+                pipeline_status = 'failed',
+                pipeline_error = ?,
+                updated_at = ?
+              WHERE id = ?
+            `)
+            .run(errorMsg, now, currentJob.entity_id);
+        }
       }
     }
     return false;
@@ -2270,6 +2516,79 @@ async function startServer() {
     };
 
     return res.json(stats);
+  });
+
+  // -----------------------------------------------------------
+  // Pipeline Diagnostics & Failed Jobs Recovery Endpoints
+  // -----------------------------------------------------------
+  apiRouter.get('/jobs/failed', requireAuth, (_req: Request, res: Response) => {
+    const failed = sqlite
+      .prepare(`
+        SELECT id, job_type, entity_id, status, attempts, max_attempts,
+               last_error, original_error, available_at, locked_at, locked_by,
+               created_at, updated_at
+        FROM jobs
+        WHERE status = 'failed'
+        ORDER BY id DESC
+        LIMIT 100
+      `)
+      .all();
+    return res.json(failed);
+  });
+
+  apiRouter.post('/jobs/:id/retry', requireAuth, (req: Request, res: Response) => {
+    const jobId = parseInt(req.params.id, 10);
+    const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
+
+    const job = sqlite.prepare('SELECT * FROM jobs WHERE id = ?').get(jobId) as unknown as QueueJob | undefined;
+    if (!job) {
+      return res.status(404).json({ ok: false, error: `Job #${jobId} not found.` });
+    }
+
+    sqlite
+      .prepare(`
+        UPDATE jobs SET
+          status = 'queued', attempts = 0, available_at = ?, locked_at = NULL,
+          locked_by = NULL, lease_until = NULL, last_error = NULL, updated_at = ?
+        WHERE id = ?
+      `)
+      .run(now, now, jobId);
+
+    if (job.job_type === 'transcribe') {
+      sqlite.prepare("UPDATE calls SET status = 'uploaded', pipeline_status = 'queued', pipeline_error = NULL, updated_at = ? WHERE id = ?").run(now, job.entity_id);
+    }
+
+    addLog('info', 'JOB_RETRIED', `Job #${jobId} (${job.job_type} for entity #${job.entity_id}) manually requeued by user.`);
+    setImmediate(() => claimAndProcessNextJob());
+
+    return res.json({ ok: true, message: `Job #${jobId} requeued for processing.` });
+  });
+
+  apiRouter.post('/jobs/retry-all', requireAuth, (_req: Request, res: Response) => {
+    const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
+    const failed = sqlite.prepare("SELECT id, job_type, entity_id FROM jobs WHERE status = 'failed'").all() as { id: number; job_type: string; entity_id: number }[];
+
+    if (failed.length === 0) {
+      return res.json({ ok: true, retried: 0, message: 'No failed jobs to retry.' });
+    }
+
+    sqlite.prepare(`
+      UPDATE jobs SET
+        status = 'queued', attempts = 0, available_at = ?, locked_at = NULL,
+        locked_by = NULL, lease_until = NULL, last_error = NULL, updated_at = ?
+      WHERE status = 'failed'
+    `).run(now, now);
+
+    for (const f of failed) {
+      if (f.job_type === 'transcribe') {
+        sqlite.prepare("UPDATE calls SET status = 'uploaded', pipeline_status = 'queued', pipeline_error = NULL, updated_at = ? WHERE id = ?").run(now, f.entity_id);
+      }
+    }
+
+    addLog('info', 'JOBS_RETRY_ALL', `Batch recovery triggered: ${failed.length} failed job(s) requeued.`);
+    setImmediate(() => claimAndProcessNextJob());
+
+    return res.json({ ok: true, retried: failed.length, message: `${failed.length} failed job(s) requeued for execution.` });
   });
 
   // -----------------------------------------------------------

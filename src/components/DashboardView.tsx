@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   PhoneCall,
   TrendingUp,
@@ -18,9 +18,12 @@ import {
   Activity,
   AlertTriangle,
   Info,
+  RotateCcw,
+  RefreshCw,
 } from 'lucide-react';
-import type { PipelineStats } from '../types';
+import type { PipelineStats, FailedJobItem } from '../types';
 import type { ActiveTab } from './Sidebar';
+import { api } from '../lib/api';
 
 interface DashboardViewProps {
   stats: PipelineStats | null;
@@ -35,6 +38,55 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   onStartPipeline,
   isLoading,
 }) => {
+  const [failedJobsList, setFailedJobsList] = useState<FailedJobItem[]>([]);
+  const [loadingFailedJobs, setLoadingFailedJobs] = useState(false);
+  const [retryingJobId, setRetryingJobId] = useState<number | null>(null);
+  const [retryingAll, setRetryingAll] = useState(false);
+  const [recoveryMessage, setRecoveryMessage] = useState<string | null>(null);
+
+  const fetchFailedJobs = useCallback(async () => {
+    try {
+      setLoadingFailedJobs(true);
+      const jobs = await api.getFailedJobs();
+      setFailedJobsList(jobs);
+    } catch {
+      // ignore
+    } finally {
+      setLoadingFailedJobs(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchFailedJobs();
+  }, [fetchFailedJobs, stats?.failed]);
+
+  const handleRetrySingle = async (jobId: number) => {
+    try {
+      setRetryingJobId(jobId);
+      const res = await api.retryJob(jobId);
+      setRecoveryMessage(res.message);
+      await fetchFailedJobs();
+      setTimeout(() => setRecoveryMessage(null), 4000);
+    } catch (err: any) {
+      setRecoveryMessage(`Retry failed: ${err.message}`);
+    } finally {
+      setRetryingJobId(null);
+    }
+  };
+
+  const handleRetryAll = async () => {
+    try {
+      setRetryingAll(true);
+      const res = await api.retryAllFailedJobs();
+      setRecoveryMessage(res.message);
+      await fetchFailedJobs();
+      setTimeout(() => setRecoveryMessage(null), 4000);
+    } catch (err: any) {
+      setRecoveryMessage(`Batch retry failed: ${err.message}`);
+    } finally {
+      setRetryingAll(false);
+    }
+  };
   const totalCalls = stats?.calls || 0;
   const transcribed = stats?.transcribed || 0;
   const trades = stats?.trades || 0;
@@ -294,14 +346,77 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             </h3>
           </div>
 
-          {failedJobs > 0 ? (
-            <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-800 mb-4">
-              <b>{failedJobs} failed item(s)</b> requiring inspection. Check Diagnostics or Logs for detail.
+          {recoveryMessage && (
+            <div className="p-3 bg-amber-50 border border-amber-300 rounded-xl text-xs text-amber-900 mb-4 flex items-center justify-between">
+              <span>{recoveryMessage}</span>
+              <button onClick={() => setRecoveryMessage(null)} className="text-neutral-500 hover:text-black text-xs font-bold">✕</button>
+            </div>
+          )}
+
+          {failedJobs > 0 || failedJobsList.length > 0 ? (
+            <div className="space-y-3 mb-4">
+              <div className="p-3.5 bg-rose-50 border border-rose-200 rounded-xl">
+                <div className="flex items-center justify-between gap-2 mb-2">
+                  <div className="flex items-center gap-1.5 text-xs font-bold text-rose-900">
+                    <AlertTriangle className="w-4 h-4 text-rose-600" />
+                    <span>{failedJobsList.length || failedJobs} Job(s) In Dead Letter / Review Queue</span>
+                  </div>
+                  <button
+                    onClick={handleRetryAll}
+                    disabled={retryingAll || loadingFailedJobs}
+                    className="px-2.5 py-1 bg-rose-600 hover:bg-rose-700 disabled:opacity-50 text-white rounded-lg text-[11px] font-bold flex items-center gap-1 transition-colors cursor-pointer"
+                  >
+                    <RefreshCw className={`w-3 h-3 ${retryingAll ? 'animate-spin' : ''}`} />
+                    <span>{retryingAll ? 'Retrying All...' : 'Retry All Failed'}</span>
+                  </button>
+                </div>
+                <p className="text-[11px] text-rose-700 leading-snug">
+                  Jobs preserved without data loss or false scorecards. Each failed job records its exact error trace.
+                </p>
+              </div>
+
+              {failedJobsList.length > 0 && (
+                <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
+                  {failedJobsList.slice(0, 5).map((job) => (
+                    <div
+                      key={job.id}
+                      className="p-2.5 bg-neutral-50 hover:bg-neutral-100/80 border border-neutral-200 rounded-xl text-xs flex items-center justify-between gap-3 transition-colors"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2">
+                          <span className="px-1.5 py-0.5 rounded bg-neutral-200 text-neutral-800 text-[10px] font-mono uppercase font-bold">
+                            {job.job_type} #{job.entity_id}
+                          </span>
+                          <span className="text-[10px] text-neutral-500">
+                            Attempts: {job.attempts}/{job.max_attempts}
+                          </span>
+                        </div>
+                        <div className="text-[11px] text-rose-600 truncate mt-1" title={job.last_error || job.original_error || 'Execution failure'}>
+                          {job.last_error || job.original_error || 'Execution failure'}
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => handleRetrySingle(job.id)}
+                        disabled={retryingJobId === job.id}
+                        className="px-2 py-1 bg-white hover:bg-neutral-50 border border-neutral-300 rounded-lg text-[11px] font-semibold text-neutral-700 hover:text-black flex items-center gap-1 shrink-0 transition-colors cursor-pointer"
+                      >
+                        <RotateCcw className={`w-3 h-3 ${retryingJobId === job.id ? 'animate-spin' : ''}`} />
+                        <span>{retryingJobId === job.id ? 'Retrying...' : 'Retry'}</span>
+                      </button>
+                    </div>
+                  ))}
+                  {failedJobsList.length > 5 && (
+                    <div className="text-center text-[10px] text-neutral-500 py-1">
+                      + {failedJobsList.length - 5} more failed job(s) in queue
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           ) : (
             <div className="p-3 bg-neutral-50 border border-neutral-200 rounded-xl text-xs text-neutral-700 mb-4 flex items-center gap-2">
               <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
-              <span>No blocking pipeline failures. All valid AI audits advance directly to scorecards.</span>
+              <span>No blocking pipeline failures. Circuit breakers &amp; background watchdog active.</span>
             </div>
           )}
 
