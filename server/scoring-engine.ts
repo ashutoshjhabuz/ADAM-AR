@@ -4,7 +4,7 @@
 
 import type { CallRecord, TradeRecord, ScorecardRecord, AuditRecord } from '../src/types';
 
-export type ComplianceStatus = 'PASS' | 'FAIL' | 'REVIEW';
+export type ComplianceStatus = 'PASS' | 'FAIL' | 'REVIEW' | 'NOT_AUDITED';
 
 export interface AuditQuestionOutput {
   status: ComplianceStatus;
@@ -37,10 +37,14 @@ export interface ScoreCalculationResult {
 /**
  * The Single Authoritative SEBI Scoring Function.
  * Used by server workers, manual review, force audit, bulk recalculation, and tests.
- * Supports passing status arguments individually OR passing a UnifiedAuditOutput object.
+ * Standard offline pre-order audit evaluates active controls: Q1, Q2, Q3, Q5 (Q4 disabled by default).
+ * Maximum active score: 4 marks.
+ * Q1, Q2, Q5 are FATAL (fail -> 0/4).
+ * Q3 is NON-FATAL (fail -> 3/4).
+ * All PASS -> 4/4.
  */
 export function calculateAuthoritativeScore(
-  q1Input: ComplianceStatus | { q1: { status: ComplianceStatus }; q2: { status: ComplianceStatus }; q3: { status: ComplianceStatus }; q4: { status: ComplianceStatus }; q5: { status: ComplianceStatus } },
+  q1Input: ComplianceStatus | { q1: { status: ComplianceStatus }; q2: { status: ComplianceStatus }; q3: { status: ComplianceStatus }; q4?: { status: ComplianceStatus }; q5: { status: ComplianceStatus } },
   q2Arg?: ComplianceStatus,
   q3Arg?: ComplianceStatus,
   q4Arg?: ComplianceStatus,
@@ -49,20 +53,20 @@ export function calculateAuthoritativeScore(
   let q1Status: ComplianceStatus = 'PASS';
   let q2Status: ComplianceStatus = 'PASS';
   let q3Status: ComplianceStatus = 'PASS';
-  let q4Status: ComplianceStatus = 'PASS';
+  let q4Status: ComplianceStatus = 'NOT_AUDITED';
   let q5Status: ComplianceStatus = 'PASS';
 
   if (typeof q1Input === 'object' && q1Input !== null && 'q1' in q1Input) {
     q1Status = q1Input.q1?.status || 'PASS';
     q2Status = q1Input.q2?.status || 'PASS';
     q3Status = q1Input.q3?.status || 'PASS';
-    q4Status = q1Input.q4?.status || 'PASS';
+    q4Status = q1Input.q4?.status || 'NOT_AUDITED';
     q5Status = q1Input.q5?.status || 'PASS';
   } else {
     q1Status = (q1Input as ComplianceStatus) || 'PASS';
     q2Status = q2Arg || 'PASS';
     q3Status = q3Arg || 'PASS';
-    q4Status = q4Arg || 'PASS';
+    q4Status = q4Arg || 'NOT_AUDITED';
     q5Status = q5Arg || 'PASS';
   }
 
@@ -92,9 +96,6 @@ export function calculateAuthoritativeScore(
   if (q3Status === 'REVIEW') {
     review_reasons.push('Q3: Stock, quantity, or price/CMP verification requires manual inspection.');
   }
-  if (q4Status === 'REVIEW') {
-    review_reasons.push('Q4: Customer acknowledgement requires compliance inspection.');
-  }
 
   const is_fatal = fatal_reasons.length > 0;
 
@@ -107,22 +108,24 @@ export function calculateAuthoritativeScore(
     disposition = 'NON_COMPLIANT';
     audit_comment = `NON-COMPLIANT: Fatal compliance violation (${fatal_reasons.join(' ')}). Score set to 0.`;
   } else {
-    // Non-fatal marks calculation: base 5, deduct 1 for non-pass in Q3 and Q4
-    let currentScore = 5;
-    if (q3Status !== 'PASS') currentScore -= 1;
-    if (q4Status !== 'PASS') currentScore -= 1;
+    // Active controls evaluated: Q1, Q2, Q3, Q5. Maximum score: 4.
+    // Q3 non-fatal: deduct 1 for non-pass in Q3
+    let currentScore = 4;
+    if (q3Status !== 'PASS') {
+      currentScore -= 1;
+    }
 
     score = Math.max(0, currentScore);
 
     if (review_reasons.length > 0) {
       disposition = 'NEEDS_REVIEW';
-      audit_comment = `NEEDS REVIEW: Pre-order confirmation pending compliance verification (${review_reasons.join(' ')}). Provisional Score: ${score}/5.`;
-    } else if (score === 5) {
+      audit_comment = `NEEDS REVIEW: Pre-order confirmation pending compliance verification (${review_reasons.join(' ')}). Provisional Score: ${score}/4.`;
+    } else if (score === 4) {
       disposition = 'COMPLIANT';
-      audit_comment = 'COMPLIANT: Pre-order confirmation is strictly compliant with SEBI regulatory norms. Score: 5/5.';
+      audit_comment = 'COMPLIANT: Pre-order confirmation is strictly compliant with SEBI regulatory norms. Score: 4/4.';
     } else {
       disposition = 'COMPLIANT';
-      audit_comment = `COMPLIANT WITH REMARKS: Pre-order confirmation executed with minor order verification remarks. Score: ${score}/5.`;
+      audit_comment = `COMPLIANT WITH REMARKS: Pre-order confirmation executed with minor order verification remarks. Score: ${score}/4.`;
     }
   }
 
@@ -155,15 +158,15 @@ export function persistAuditAndScorecardSync(
   const q1 = auditOutput.q1;
   const q2 = auditOutput.q2;
   const q3 = auditOutput.q3;
-  // USER MANDATE: Customer Acknowledgement always PASS
-  const q4 = {
-    status: 'PASS' as const,
-    evidence: auditOutput.q4?.evidence && !/\b(?:no|not|reject|cancel)\b/i.test(auditOutput.q4.evidence)
-      ? auditOutput.q4.evidence
-      : 'Customer affirmative verbal acknowledgement confirmed.',
+  // USER MANDATE: Q4 is disabled by default. No fabricated affirmative quotes.
+  const q4: AuditQuestionOutput = {
+    status: auditOutput.q4?.status === 'FAIL' ? 'FAIL' : 'NOT_AUDITED',
+    evidence: auditOutput.q4?.status === 'FAIL'
+      ? (auditOutput.q4.evidence || 'Customer order cancellation detected.')
+      : 'Q4 Customer Acknowledgement disabled by regulatory default (Auditing Q1, Q2, Q3, Q5 only).',
     confidence: 1.0,
-    speaker: 'CLIENT' as const,
-    reason: 'Customer verbal acknowledgement verified.',
+    speaker: 'CLIENT',
+    reason: 'Control disabled by policy.',
   };
   const q5 = auditOutput.q5;
 

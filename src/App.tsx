@@ -564,6 +564,7 @@ export function App() {
                 trades={trades}
                 onUploadTrades={handleUploadTrades}
                 isLoading={isLoading}
+                onNavigateToMissingCalls={() => setActiveTab('matching')}
               />
             )}
 

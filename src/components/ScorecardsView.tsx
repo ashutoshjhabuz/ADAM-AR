@@ -106,9 +106,9 @@ PARAMETERS\tMark\tFlag\tScore
 1. Confirmation given in registered number\t${sc.q1_status === 'PASS' ? '1' : '0'}\tFATAL\t${sc.q1_status === 'PASS' ? 'Yes' : 'No'}
 2. Client code confirmed before order\t${sc.q2_status === 'PASS' ? '1' : '0'}\tFATAL\t${sc.q2_status === 'PASS' ? 'Yes' : 'No'}
 3. Stock, price & qty confirmed\t${sc.q3_status === 'PASS' ? '1' : '0'}\t\t${sc.q3_status === 'PASS' ? 'Yes' : 'No'}
-4. Customer Acknowledge the same\t1\t\tYes
+4. Customer Acknowledge the same (Policy Inactive)\t0\t\tNOT AUDITED
 5. Return commitment prohibited\t${sc.q5_status === 'PASS' ? '1' : '0'}\tFATAL\t${sc.q5_status === 'PASS' ? 'Yes' : 'No'}
-TOTAL\t5\t${stars}\t${isFatal ? '0' : sc.score}
+TOTAL\t4\t${stars}\t${isFatal ? '0' : sc.score}
 
 Comment: ${sc.audit_comment || 'Pre Order Confirmation is as per the Regulatory Norm.'}`;
 
@@ -174,10 +174,10 @@ Comment: ${sc.audit_comment || 'Pre Order Confirmation is as per the Regulatory 
             <td style="text-align: center;">${sc.q3_status === 'PASS' ? 'Yes' : 'No'}</td>
           </tr>
           <tr>
-            <td>4. Customer Acknowledge the same?<br/><small>Evidence: "${sc.q4_evidence || 'Customer affirmative acknowledgement confirmed.'}"</small></td>
-            <td style="text-align: center;">1</td>
-            <td style="text-align: center;"></td>
-            <td style="text-align: center;">Yes</td>
+            <td>4. Customer Acknowledge the same? (Disabled by Policy)<br/><small>Status: NOT AUDITED</small></td>
+            <td style="text-align: center;">0</td>
+            <td style="text-align: center;">—</td>
+            <td style="text-align: center;">NOT AUDITED</td>
           </tr>
           <tr>
             <td>5. Wasn't there any Return Commitment ?<br/><small>Evidence: "${sc.q5_evidence || ''}"</small></td>
@@ -187,7 +187,7 @@ Comment: ${sc.audit_comment || 'Pre Order Confirmation is as per the Regulatory 
           </tr>
           <tr class="total">
             <td style="text-align: right;"><b>TOTAL</b></td>
-            <td style="text-align: center;"><b>5</b></td>
+            <td style="text-align: center;"><b>4</b></td>
             <td style="text-align: center;"><b>${displayStars}</b></td>
             <td style="text-align: center;"><b>${calculatedScore}</b></td>
           </tr>
@@ -212,8 +212,8 @@ Comment: ${sc.audit_comment || 'Pre Order Confirmation is as per the Regulatory 
 
   const downloadScorecardExcel = (sc: ScorecardRecord) => {
     const isFatal = sc.is_fatal || sc.q1_status === 'FAIL' || sc.q2_status === 'FAIL' || sc.q5_status === 'FAIL';
-    const calculatedScore = isFatal ? 0 : (sc.score !== null ? Math.max(sc.score, 4) : 5);
-    const displayStars = isFatal ? '*' : '*'.repeat(Math.max(1, Math.min(5, calculatedScore)));
+    const calculatedScore = isFatal ? 0 : (sc.score !== null ? sc.score : 4);
+    const displayStars = isFatal ? '*' : '*'.repeat(Math.max(1, Math.min(4, calculatedScore)));
 
     const rows = [
       ['Offline Pre Order Confirmation Call Audit Score Card', '', '', ''],
@@ -225,9 +225,9 @@ Comment: ${sc.audit_comment || 'Pre Order Confirmation is as per the Regulatory 
       ["1. Confirmation given in the Customer's Registered / authorised Number ?", sc.q1_status === 'PASS' ? 1 : 0, 'FATAL', sc.q1_status === 'PASS' ? 'Yes' : 'No'],
       ['2. Pre Order Confirmation is as per the Regulatory Norms?', sc.q2_status === 'PASS' ? 1 : 0, 'FATAL', sc.q2_status === 'PASS' ? 'Yes' : 'No'],
       ["3. Wasn't pre-order partial (Stock, price & qty confirmed)", sc.q3_status === 'PASS' ? 1 : 0, '', sc.q3_status === 'PASS' ? 'Yes' : 'No'],
-      ['4. Customer Acknowledge the same?', 1, '', 'Yes'],
+      ['4. Customer Acknowledge the same? (Policy Inactive)', 0, '—', 'NOT AUDITED'],
       ["5. Wasn't there any Return Commitment ?", sc.q5_status === 'PASS' ? 1 : 0, 'FATAL', sc.q5_status === 'PASS' ? 'Yes' : 'No'],
-      ['TOTAL', 5, displayStars, calculatedScore],
+      ['TOTAL', 4, displayStars, calculatedScore],
       ['', '', '', ''],
       ['Comment about the call:', sc.audit_comment || 'Pre Order Confirmation is as per the Regulatory Norm.', '', ''],
     ];
@@ -245,7 +245,7 @@ Comment: ${sc.audit_comment || 'Pre Order Confirmation is as per the Regulatory 
     }
     const data = filtered.map((sc) => {
       const isFatal = sc.is_fatal || sc.q1_status === 'FAIL' || sc.q2_status === 'FAIL' || sc.q5_status === 'FAIL';
-      const scoreVal = isFatal ? 0 : (sc.score !== null ? Math.max(sc.score, 4) : 5);
+      const scoreVal = isFatal ? 0 : (sc.score !== null ? sc.score : 4);
       return {
         'Scorecard ID': sc.id,
         'Call Ref ID': sc.call_id || '—',
@@ -261,11 +261,11 @@ Comment: ${sc.audit_comment || 'Pre Order Confirmation is as per the Regulatory 
         'Q2 Evidence': sc.q2_evidence || '',
         'Q3 Stock Price Qty': sc.q3_status,
         'Q3 Evidence': sc.q3_evidence || '',
-        'Q4 Customer Ack': 'PASS',
+        'Q4 Customer Ack': 'NOT AUDITED (Policy Inactive)',
         'Q5 No Return Commitment': sc.q5_status,
         'Q5 Evidence': sc.q5_evidence || '',
         'Fatal Flag': isFatal ? 'YES (FATAL)' : 'NO',
-        'Total Score (0-5)': scoreVal,
+        'Total Score (0-4)': scoreVal,
         'Stars Rating': isFatal ? '*' : '*'.repeat(scoreVal),
         'Audit Comment': sc.audit_comment || '',
       };
@@ -313,7 +313,7 @@ Comment: ${sc.audit_comment || 'Pre Order Confirmation is as per the Regulatory 
             <span>Official Pre-Order Audit Scorecards ({filtered.length})</span>
           </h2>
           <p className="text-xs text-neutral-500 mt-0.5">
-            Standard offline pre-order verification scorecards with exact 5-mark evaluation and verbatim evidence.
+            Standard offline pre-order verification scorecards with exact 4-mark evaluation and verbatim evidence.
           </p>
         </div>
 
@@ -408,10 +408,9 @@ Comment: ${sc.audit_comment || 'Pre Order Confirmation is as per the Regulatory 
               onChange={(e) => setMarkFilter(e.target.value)}
               className="w-full px-3 py-1.5 bg-neutral-50 border border-neutral-300 rounded-lg text-xs font-medium focus:border-amber-400 focus:outline-none"
             >
-              <option value="">All Marks (0-5)</option>
-              <option value="5">5 Marks (Perfect)</option>
-              <option value="4">4 Marks</option>
-              <option value="3">3 Marks</option>
+              <option value="">All Marks (0-4)</option>
+              <option value="4">4 Marks (Fully Compliant)</option>
+              <option value="3">3 Marks (Partial - Q3 Non-fatal)</option>
               <option value="2">2 Marks</option>
               <option value="1">1 Mark</option>
               <option value="0">0 Marks (Fatal Failure)</option>
@@ -540,7 +539,7 @@ Comment: ${sc.audit_comment || 'Pre Order Confirmation is as per the Regulatory 
                   </tbody>
                 </table>
 
-                {/* 5-Mark Compliance Scorecard Table */}
+                {/* 4-Mark Compliance Scorecard Table */}
                 <table className="w-full border-collapse border border-slate-400 text-xs">
                   <thead className="bg-blue-900 text-white font-bold text-center">
                     <tr>
@@ -566,6 +565,7 @@ Comment: ${sc.audit_comment || 'Pre Order Confirmation is as per the Regulatory 
                           ans: sc.q1_status,
                           evidence: sc.q1_evidence,
                           fatal: true,
+                          disabled: false,
                         },
                         {
                           id: 'Q2',
@@ -580,6 +580,7 @@ Comment: ${sc.audit_comment || 'Pre Order Confirmation is as per the Regulatory 
                             return ev || (sc.q2_status === 'PASS' ? 'Client account code confirmed.' : 'Client account code (UCC) was not verbally confirmed prior to order execution.');
                           })(),
                           fatal: true,
+                          disabled: false,
                         },
                         {
                           id: 'Q3',
@@ -587,15 +588,15 @@ Comment: ${sc.audit_comment || 'Pre Order Confirmation is as per the Regulatory 
                           ans: isQ3ResolvedPass ? 'PASS' : sc.q3_status,
                           evidence: sc.q3_evidence,
                           fatal: false,
+                          disabled: false,
                         },
                         {
                           id: 'Q4',
-                          q: 'Customer Acknowledge the same?',
-                          ans: 'PASS',
-                          evidence: sc.q4_evidence && !/\b(?:no|cancel|stop|reject)\b/i.test(sc.q4_evidence)
-                            ? sc.q4_evidence
-                            : 'Customer affirmative verbal acknowledgement confirmed.',
+                          q: 'Customer Acknowledge the same? (Policy Inactive)',
+                          ans: 'NOT_AUDITED',
+                          evidence: 'Disabled by regulatory audit policy; not factored into 4-mark score.',
                           fatal: false,
+                          disabled: true,
                         },
                         {
                           id: 'Q5',
@@ -603,19 +604,22 @@ Comment: ${sc.audit_comment || 'Pre Order Confirmation is as per the Regulatory 
                           ans: sc.q5_status,
                           evidence: sc.q5_evidence,
                           fatal: true,
+                          disabled: false,
                         },
                       ];
 
-                      const calculatedScore = isFatal ? 0 : (isQ3ResolvedPass ? 5 : (sc.score !== null ? Math.max(sc.score, 4) : 5));
-                      const displayStars = isFatal ? '*' : '*'.repeat(Math.max(1, Math.min(5, calculatedScore)));
+                      const calculatedScore = isFatal ? 0 : (sc.score !== null ? sc.score : (isQ3ResolvedPass ? 4 : 3));
+                      const displayStars = isFatal ? '*' : '*'.repeat(Math.max(1, Math.min(4, calculatedScore)));
 
                       return (
                         <>
                           {rows.map((p) => {
-                            const isPass = p.id === 'Q4' ? true : p.ans === 'PASS';
+                            const isPass = !p.disabled && p.ans === 'PASS';
+                            const markVal = p.disabled ? '0' : (isPass ? '1' : '0');
+                            const scoreLabel = p.disabled ? 'NOT AUDITED' : (isPass ? 'Yes' : 'No');
                             return (
                               <tr key={p.id} className="hover:bg-slate-50/50">
-                                <td className={`border border-slate-400 px-3 py-2 ${p.fatal ? 'text-red-700 font-medium' : 'text-slate-800'}`}>
+                                <td className={`border border-slate-400 px-3 py-2 ${p.fatal ? 'text-red-700 font-medium' : p.disabled ? 'text-slate-500' : 'text-slate-800'}`}>
                                   <div>{p.q}</div>
                                   {p.evidence && (
                                     <div className="text-[11px] text-slate-500 italic mt-0.5">
@@ -624,13 +628,13 @@ Comment: ${sc.audit_comment || 'Pre Order Confirmation is as per the Regulatory 
                                   )}
                                 </td>
                                 <td className="border border-slate-400 px-3 py-2 text-center font-mono font-bold text-slate-900">
-                                  {isPass ? '1' : '0'}
+                                  {markVal}
                                 </td>
                                 <td className="border border-slate-400 px-3 py-2 text-center font-bold text-rose-700">
-                                  {p.fatal ? 'FATAL' : ''}
+                                  {p.fatal ? 'FATAL' : p.disabled ? <span className="text-slate-400 font-normal">INACTIVE</span> : ''}
                                 </td>
                                 <td className="border border-slate-400 px-3 py-2 text-center font-bold text-slate-900">
-                                  {isPass ? 'Yes' : 'No'}
+                                  {scoreLabel}
                                 </td>
                               </tr>
                             );
@@ -639,12 +643,12 @@ Comment: ${sc.audit_comment || 'Pre Order Confirmation is as per the Regulatory 
                           {/* Total Row */}
                           <tr className="bg-lime-100/80 font-bold text-slate-950">
                             <td className="border border-slate-400 px-3 py-2 text-right">TOTAL</td>
-                            <td className="border border-slate-400 px-3 py-2 text-center font-mono text-sm">5</td>
+                            <td className="border border-slate-400 px-3 py-2 text-center font-mono text-sm">4</td>
                             <td className="border border-slate-400 px-3 py-2 text-center font-mono text-base text-amber-800">
                               {displayStars}
                             </td>
                             <td className="border border-slate-400 px-3 py-2 text-center font-mono text-base text-indigo-900">
-                              {calculatedScore}
+                              {calculatedScore} / 4
                             </td>
                           </tr>
                         </>

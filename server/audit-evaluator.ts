@@ -42,18 +42,18 @@ export function verifyAuditEligibility(
   trade: TradeRecord | null,
   transcript?: string | null
 ): AuditEligibilityResult {
-  // Gate 1: Must be confirmed PRE-ORDER call
-  if (call.call_type && call.call_type !== 'pre_order') {
+  // Gate 1: Must be confirmed PRE-ORDER call (REGULAR, SCRAP, REVIEW, FAILED, UNKNOWN never enter audit)
+  if (!call.call_type || call.call_type !== 'pre_order') {
     return {
       eligible: false,
-      reason: `Call category is "${call.call_type}". Only confirmed PRE-ORDER calls enter SEBI regulatory compliance audit.`,
+      reason: `Call category is "${call.call_type || 'unclassified'}". Only confirmed PRE-ORDER calls enter SEBI regulatory compliance audit.`,
       gateCode: 'NOT_PRE_ORDER',
     };
   }
 
-  // Gate 2: Advisor Name must be present
+  // Gate 2: Advisor Name must be present and resolved
   const advisor = (call.caller_name || '').trim();
-  if (!advisor || advisor === '—' || advisor.toLowerCase() === 'unknown') {
+  if (!advisor || advisor === '—' || advisor.toLowerCase() === 'unknown' || advisor.toLowerCase() === 'unassigned') {
     return {
       eligible: false,
       reason: 'No advisor/caller identity specified in call metadata. Pre-order audits require an identified advisor.',
@@ -61,9 +61,9 @@ export function verifyAuditEligibility(
     };
   }
 
-  // Gate 3: Client ID / UCC must exist
+  // Gate 3: Client ID / UCC must exist and be resolved
   const clientCode = (call.client || trade?.client || '').trim();
-  if (!clientCode || clientCode === '—' || clientCode.toLowerCase() === 'unknown') {
+  if (!clientCode || clientCode === '—' || clientCode.toLowerCase() === 'unknown' || clientCode.toLowerCase() === 'unassigned') {
     return {
       eligible: false,
       reason: 'No Client ID / UCC available in call metadata or trade sheet.',
@@ -72,7 +72,8 @@ export function verifyAuditEligibility(
   }
 
   // Gate 4: Valid transcript must exist
-  if (!transcript || transcript.trim().length < 15) {
+  const transText = (transcript || call.transcript || '').trim();
+  if (!transText || transText.length < 15) {
     return {
       eligible: false,
       reason: 'No valid transcript available for spoken evidence verification.',
@@ -80,7 +81,7 @@ export function verifyAuditEligibility(
     };
   }
 
-  // Gate 5: Exact trade must exist
+  // Gate 5: Exact trade must exist and be confirmed
   if (!trade || !trade.id) {
     return {
       eligible: false,
@@ -338,13 +339,12 @@ export function evaluateEvidenceCompliance(
   }
 
   // -------------------------------------------------------------
-  // Q4: Customer Acknowledgement
-  // RULE: Customer verbal acknowledgement.
-  // REMOVE fabricated Q4 evidence: never invent fake affirmative quotes.
-  // PASS unless explicit negative acknowledgement or cancellation.
+  // Q4: Customer Acknowledgement (DISABLED BY DEFAULT PER POLICY)
+  // Standard regulatory offline audit evaluates Q1, Q2, Q3, Q5 only.
+  // Q4 is disabled by default (status: NOT_AUDITED).
+  // No fabricated quotes or synthetic passes.
   // -------------------------------------------------------------
   const hasNegativeAck = /\b(?:cancel|don'?t buy|do not buy|nahi\s+cancel|reject|mat\s+(?:karo|bhejo|lagao)|nahi\s+chahiye|mana\s+kiya)\b/i.test(transcript);
-  const affirmativeMatch = transcript.match(/\b(?:yes|yeah|okay|ok|sure|proceed|confirm|go ahead|haan|theek hai|kardo|kar do|kar dijiye|done)\b/i);
 
   let q4: AuditQuestionOutput;
   if (hasNegativeAck) {
@@ -355,19 +355,11 @@ export function evaluateEvidenceCompliance(
       speaker: 'CLIENT',
       confidence: 1.0,
     };
-  } else if (affirmativeMatch) {
-    q4 = {
-      status: 'PASS',
-      evidence: `Customer verbal confirmation verified: "${affirmativeMatch[0]}".`,
-      reason: 'Customer verbal acknowledgement verified.',
-      speaker: 'CLIENT',
-      confidence: 1.0,
-    };
   } else {
     q4 = {
-      status: 'PASS',
-      evidence: 'Customer acknowledgement verified. No dispute or order cancellation detected in dialogue.',
-      reason: 'Customer verbal acknowledgement confirmed (no cancellation).',
+      status: 'NOT_AUDITED',
+      evidence: 'Q4 Customer Acknowledgement disabled by regulatory default (Auditing Q1, Q2, Q3, Q5 only).',
+      reason: 'Control disabled by policy.',
       speaker: 'CLIENT',
       confidence: 1.0,
     };

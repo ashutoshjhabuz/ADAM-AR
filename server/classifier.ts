@@ -58,50 +58,59 @@ const SCRAP_VOICEMAIL_PATTERNS = [
 
 /**
  * Stage 1: SCRAP Detection (Executed strictly BEFORE any other classification)
+ * Detects voicemail, ring-only calls, carrier notifications, dead air, silence, and immediate disconnects.
+ * A 61-second proper call with real speech must NEVER become scrap.
  */
 export function detectScrapCall(
   transcript?: string | null,
   durationSeconds?: number
 ): PreOrderClassificationResult | null {
-  // Check 1: Duration <= 8 seconds is definitely a SCRAP call per regulatory specification
-  if (durationSeconds !== undefined && durationSeconds > 0 && durationSeconds <= 8) {
-    return {
-      call_type: 'scrap',
-      confidence: 0.99,
-      evidence: `Call duration is ${durationSeconds}s (less than 8 seconds scrap threshold).`,
-      evidence_speaker: 'SYSTEM',
-      evidence_timestamp: '00:00:00',
-      reason: 'Scrap call: short disconnect, missed ring, or failed connection under 8s.',
-      is_scrap: true,
-      model_used: 'deterministic-telephony-watchdog-v18',
-    };
-  }
+  const cleanTranscript = (transcript || '').trim();
+  const lowerText = cleanTranscript.toLowerCase();
 
-  // Check 2: Empty, silent, or negligible transcript
-  if (!transcript || transcript.trim().length < 10) {
-    return {
-      call_type: 'scrap',
-      confidence: 0.95,
-      evidence: 'Audio transcript is silent, empty, or insufficient to convey speech.',
-      evidence_speaker: 'SYSTEM',
-      evidence_timestamp: '00:00:00',
-      reason: 'Scrap call: no spoken dialogue captured.',
-      is_scrap: true,
-      model_used: 'deterministic-telephony-watchdog-v18',
-    };
-  }
-
-  // Check 3: Automated voicemail / carrier telecom disconnect
-  const lowerText = transcript.toLowerCase();
+  // Check 1: Automated voicemail / carrier telecom disconnect markers (any duration)
   for (const vmTerm of SCRAP_VOICEMAIL_PATTERNS) {
     if (lowerText.includes(vmTerm)) {
       return {
         call_type: 'scrap',
         confidence: 0.98,
-        evidence: `Automated telephony / voicemail marker detected: "${vmTerm}".`,
+        evidence: `Automated telephony / carrier marker detected: "${vmTerm}".`,
         evidence_speaker: 'SYSTEM',
         evidence_timestamp: '00:00:01',
-        reason: 'Scrap call: reached automated voicemail or telecom network prompt.',
+        reason: 'Scrap call: reached carrier automated prompt, telecom notification, or voicemail.',
+        is_scrap: true,
+        model_used: 'deterministic-telephony-watchdog-v18',
+      };
+    }
+  }
+
+  // Check 2: Empty, silent, or negligible transcript (dead air / noise-only)
+  if (cleanTranscript.length < 10) {
+    return {
+      call_type: 'scrap',
+      confidence: 0.95,
+      evidence: 'Audio transcript is silent, dead air, or contains no decipherable speech.',
+      evidence_speaker: 'SYSTEM',
+      evidence_timestamp: '00:00:00',
+      reason: 'Scrap call: no spoken dialogue captured in audio recording.',
+      is_scrap: true,
+      model_used: 'deterministic-telephony-watchdog-v18',
+    };
+  }
+
+  // Check 3: Short duration (<= 8s) ONLY IF there is no substantive spoken dialogue
+  // (A real conversation with >= 15 words or explicit order intent is NOT scrap even if brief)
+  const wordCount = cleanTranscript.split(/\s+/).filter(Boolean).length;
+  if (durationSeconds !== undefined && durationSeconds > 0 && durationSeconds <= 8) {
+    const hasExplicitOrder = /\b(?:buy|sell|order|punch|execute)\b/i.test(lowerText);
+    if (!hasExplicitOrder && wordCount < 15) {
+      return {
+        call_type: 'scrap',
+        confidence: 0.99,
+        evidence: `Call duration is ${durationSeconds}s (< 8s threshold) without actionable dialogue.`,
+        evidence_speaker: 'SYSTEM',
+        evidence_timestamp: '00:00:00',
+        reason: 'Scrap call: short disconnect, missed ring, or connection under 8s.',
         is_scrap: true,
         model_used: 'deterministic-telephony-watchdog-v18',
       };
@@ -310,7 +319,7 @@ ${transcript.slice(0, 6000)}
   let primaryResult: PreOrderClassificationResult | null = null;
   let primaryModel = '';
 
-  // Attempt 1: Groq LLM (OpenAI GPT-OSS / Qwen)
+  // Primary AI Engine: Groq Llama 3.3 70B Versatile
   if (groqApiKey) {
     try {
       const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
@@ -320,7 +329,7 @@ ${transcript.slice(0, 6000)}
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          model: 'openai/gpt-oss-120b',
+          model: 'llama-3.3-70b-versatile',
           temperature: 0.05,
           response_format: { type: 'json_object' },
           messages: [
@@ -341,54 +350,69 @@ ${transcript.slice(0, 6000)}
             evidence: parsed.evidence || '',
             evidence_speaker: parsed.evidence_speaker || 'CLIENT',
             evidence_timestamp: parsed.evidence_timestamp || '00:00:15',
-            reason: parsed.reason || 'AI semantic intent evaluation',
-            model_used: 'groq/openai/gpt-oss-120b',
+            reason: parsed.reason || 'Groq Llama 3.3 70B semantic intent evaluation',
+            model_used: 'groq/llama-3.3-70b-versatile',
             prompt_version: 'v18.0.0',
           };
-          primaryModel = 'groq/openai/gpt-oss-120b';
+          primaryModel = 'groq/llama-3.3-70b-versatile';
         }
       }
     } catch {
-      // Continue to fallback
+      // Primary failed, will attempt secondary Groq model
     }
-  }
 
-  // Fallback: Gemini API if Groq unavailable
-  if (!primaryResult && geminiApiKey) {
-    try {
-      const { GoogleGenAI } = await import('@google/genai');
-      const ai = new GoogleGenAI({ apiKey: geminiApiKey });
-      const geminiRes = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
-        contents: prompt,
-        config: {
-          responseMimeType: 'application/json',
-          temperature: 0.1,
-        },
-      });
+    // Secondary / Fallback on Groq: Llama 3.1 8B Instant (No Gemini silent fallback)
+    if (!primaryResult) {
+      try {
+        const fallbackRes = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${groqApiKey}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            model: 'llama-3.1-8b-instant',
+            temperature: 0.05,
+            response_format: { type: 'json_object' },
+            messages: [
+              { role: 'system', content: 'You are a strict SEBI compliance auditor. Respond strictly in JSON.' },
+              { role: 'user', content: prompt },
+            ],
+          }),
+        });
 
-      if (geminiRes.text) {
-        const parsed = JSON.parse(geminiRes.text);
-        primaryResult = {
-          call_type: parsed.call_type || 'review',
-          confidence: Number(parsed.confidence) || 0.85,
-          evidence: parsed.evidence || '',
-          evidence_speaker: parsed.evidence_speaker || 'CLIENT',
-          evidence_timestamp: parsed.evidence_timestamp || '00:00:15',
-          reason: parsed.reason || 'Gemini semantic intent evaluation',
-          model_used: 'gemini-2.5-flash',
-          prompt_version: 'v18.0.0',
-        };
-        primaryModel = 'gemini-2.5-flash';
+        if (fallbackRes.ok) {
+          const json = await fallbackRes.json();
+          const content = json.choices?.[0]?.message?.content;
+          if (content) {
+            const parsed = JSON.parse(content);
+            primaryResult = {
+              call_type: parsed.call_type || 'review',
+              confidence: Number(parsed.confidence) || 0.82,
+              evidence: parsed.evidence || '',
+              evidence_speaker: parsed.evidence_speaker || 'CLIENT',
+              evidence_timestamp: parsed.evidence_timestamp || '00:00:15',
+              reason: parsed.reason || 'Groq Llama 3.1 8B Instant semantic intent evaluation',
+              model_used: 'groq/llama-3.1-8b-instant',
+              prompt_version: 'v18.0.0',
+            };
+            primaryModel = 'groq/llama-3.1-8b-instant';
+          }
+        }
+      } catch {
+        // AI failure
       }
-    } catch {
-      // Continue to deterministic fallback
     }
   }
 
-  // If no AI was reachable, use the deterministic semantic classifier
+  // If no AI was reachable, fallback to deterministic semantic classifier with audit flag
   if (!primaryResult) {
-    return classifyCallIntent(transcript, durationSeconds);
+    const localRes = classifyCallIntent(transcript, durationSeconds);
+    return {
+      ...localRes,
+      reason: groqApiKey ? `[AI_RETRY_FALLBACK] ${localRes.reason}` : localRes.reason,
+      model_used: groqApiKey ? 'deterministic-semantic-v18 (AI_FAILED_FALLBACK)' : 'deterministic-semantic-v18',
+    };
   }
 
   // Backend Validation of Evidence Substring
@@ -416,7 +440,7 @@ ${transcript.slice(0, 6000)}
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          model: 'qwen/qwen3.8-27b',
+          model: 'llama-3.1-8b-instant',
           temperature: 0.05,
           response_format: { type: 'json_object' },
           messages: [
@@ -437,11 +461,11 @@ ${transcript.slice(0, 6000)}
             return {
               call_type: 'review',
               confidence: 0.60,
-              evidence: `Model 1 (${primaryModel}) reported "${primaryResult.call_type}", while Model 2 (qwen3.8-27b) reported "${secType}".`,
+              evidence: `Model 1 (${primaryModel}) reported "${primaryResult.call_type}", while Model 2 (llama-3.1-8b-instant) reported "${secType}".`,
               evidence_speaker: 'UNKNOWN',
               evidence_timestamp: primaryResult.evidence_timestamp,
               reason: 'AI model disagreement: Dual-AI check failed consensus. Marked for compliance officer review.',
-              model_used: `${primaryModel} + qwen/qwen3.8-27b`,
+              model_used: `${primaryModel} + groq/llama-3.1-8b-instant`,
               secondary_model_agreement: false,
               prompt_version: 'v18.0.0',
             };

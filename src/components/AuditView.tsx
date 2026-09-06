@@ -843,13 +843,13 @@ export const AuditView: React.FC<AuditViewProps> = ({
                     </div>
 
                     {/* Q4 */}
-                    <div className="p-2 rounded-xl border bg-emerald-50/50 border-emerald-200 flex items-center justify-between">
+                    <div className="p-2 rounded-xl border bg-neutral-50 border-neutral-200 flex items-center justify-between">
                       <div>
-                        <div className="font-bold text-[11px] text-neutral-700">Q4 Customer Ack</div>
-                        <div className="text-[10px] text-neutral-500">1 Mark</div>
+                        <div className="font-bold text-[11px] text-neutral-500">Q4 Customer Ack</div>
+                        <div className="text-[10px] text-neutral-400">Disabled (Policy)</div>
                       </div>
-                      <span className="text-[11px] font-extrabold font-mono px-1.5 py-0.5 rounded text-emerald-700 bg-emerald-100">
-                        PASS
+                      <span className="text-[10px] font-semibold font-mono px-1.5 py-0.5 rounded text-neutral-500 bg-neutral-200">
+                        N/A
                       </span>
                     </div>
 

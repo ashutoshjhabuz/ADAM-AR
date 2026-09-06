@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
-import { GitCompare, Play, Search, CheckCircle2, AlertCircle, HelpCircle, Layers, ShieldCheck } from 'lucide-react';
+import { GitCompare, Play, Search, CheckCircle2, AlertCircle, HelpCircle, Layers, ShieldCheck, ShieldAlert, Mail } from 'lucide-react';
 import type { MatchRecord } from '../types';
+import { MissingCallsWorkQueue } from './MissingCallsWorkQueue';
 
 interface MatchingViewProps {
   matches: MatchRecord[];
@@ -13,6 +14,7 @@ export const MatchingView: React.FC<MatchingViewProps> = ({
   onRunMatching,
   isLoading,
 }) => {
+  const [activeSubTab, setActiveSubTab] = useState<'matches' | 'missing_calls'>('matches');
   const [filterStatus, setFilterStatus] = useState<string>('all');
   const [search, setSearch] = useState('');
   const [matchingStatusText, setMatchingStatusText] = useState<string | null>(null);
@@ -74,8 +76,45 @@ export const MatchingView: React.FC<MatchingViewProps> = ({
         </div>
       )}
 
-      {/* Summary Cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+      {/* Sub-Navigation Switcher */}
+      <div className="flex border-b border-neutral-200 gap-6">
+        <button
+          onClick={() => setActiveSubTab('matches')}
+          className={`pb-3 text-xs font-bold transition-colors cursor-pointer relative flex items-center gap-2 ${
+            activeSubTab === 'matches'
+              ? 'text-neutral-900 border-b-2 border-amber-400'
+              : 'text-neutral-500 hover:text-neutral-800'
+          }`}
+        >
+          <GitCompare className="w-3.5 h-3.5" />
+          <span>Call ↔ Trade Correlations</span>
+          <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-neutral-100 text-neutral-700 border border-neutral-200">
+            {matches.length}
+          </span>
+        </button>
+
+        <button
+          onClick={() => setActiveSubTab('missing_calls')}
+          className={`pb-3 text-xs font-bold transition-colors cursor-pointer relative flex items-center gap-2 ${
+            activeSubTab === 'missing_calls'
+              ? 'text-neutral-900 border-b-2 border-amber-400'
+              : 'text-neutral-500 hover:text-neutral-800'
+          }`}
+        >
+          <ShieldAlert className="w-3.5 h-3.5 text-amber-500" />
+          <span>Missing Call Confirmations Work Queue (Trade-First)</span>
+          <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-amber-100 text-amber-900 font-bold border border-amber-300">
+            SEBI Control
+          </span>
+        </button>
+      </div>
+
+      {activeSubTab === 'missing_calls' ? (
+        <MissingCallsWorkQueue onCallLinked={onRunMatching} />
+      ) : (
+        <>
+          {/* Summary Cards */}
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
         <div
           onClick={() => setFilterStatus('matched')}
           className={`p-4 rounded-xl border transition-all cursor-pointer ${
@@ -226,6 +265,8 @@ export const MatchingView: React.FC<MatchingViewProps> = ({
           </table>
         </div>
       </div>
+      </>
+      )}
     </div>
   );
 };

@@ -379,37 +379,36 @@ runTest('Test Q: Fatal violation handling', () => {
 // Test R: Unified scoring engine consistency
 // -------------------------------------------------------------
 runTest('Test R: Unified scoring engine consistency', () => {
-  // All 5 PASS -> 5/5
+  // Active controls (Q1, Q2, Q3, Q5) PASS -> 4/4
   const cleanAudit: UnifiedAuditOutput = {
     q1: { status: 'PASS', evidence: 'Phone ok', reason: 'Q1' },
     q2: { status: 'PASS', evidence: 'Code ok', reason: 'Q2' },
     q3: { status: 'PASS', evidence: 'Trade ok', reason: 'Q3' },
-    q4: { status: 'PASS', evidence: 'Ack ok', reason: 'Q4' },
+    q4: { status: 'NOT_AUDITED', evidence: 'Policy disabled', reason: 'Q4' },
     q5: { status: 'PASS', evidence: 'No guarantee', reason: 'Q5' },
     model: 'audit-v18',
   };
-  const res5 = calculateAuthoritativeScore(cleanAudit);
-  assert.strictEqual(res5.finalScore, 5);
-  assert.strictEqual(res5.isFatal, false);
+  const res4 = calculateAuthoritativeScore(cleanAudit);
+  assert.strictEqual(res4.finalScore, 4);
+  assert.strictEqual(res4.isFatal, false);
 
-  // Q3 Non-fatal deduct 1 -> 4/5
+  // Q3 Non-fatal deduct 1 -> 3/4
   const q3Audit: UnifiedAuditOutput = {
     ...cleanAudit,
     q3: { status: 'FAIL', evidence: 'Quantity missing', reason: 'Q3' },
   };
-  const res4 = calculateAuthoritativeScore(q3Audit);
-  assert.strictEqual(res4.finalScore, 4);
-  assert.strictEqual(res4.isFatal, false);
-
-  // Both Q3 and Q4 FAIL -> 3/5
-  const q3q4Audit: UnifiedAuditOutput = {
-    ...cleanAudit,
-    q3: { status: 'FAIL', evidence: 'Qty missing', reason: 'Q3' },
-    q4: { status: 'FAIL', evidence: 'Customer silent', reason: 'Q4' },
-  };
-  const res3 = calculateAuthoritativeScore(q3q4Audit);
+  const res3 = calculateAuthoritativeScore(q3Audit);
   assert.strictEqual(res3.finalScore, 3);
   assert.strictEqual(res3.isFatal, false);
+
+  // Q1 Fatal -> 0/4
+  const q1FatalAudit: UnifiedAuditOutput = {
+    ...cleanAudit,
+    q1: { status: 'FAIL', evidence: 'Unregistered number', reason: 'Q1' },
+  };
+  const resFatal = calculateAuthoritativeScore(q1FatalAudit);
+  assert.strictEqual(resFatal.finalScore, 0);
+  assert.strictEqual(resFatal.isFatal, true);
 });
 
 // -------------------------------------------------------------
@@ -485,8 +484,8 @@ runTest('Test S: Scorecard generation and audit table synchronization', () => {
 
   const { audit, scorecard } = persistAuditAndScorecardSync(db, 1, call, [], auditOutput);
 
-  assert.strictEqual(audit.score, 5);
-  assert.strictEqual(scorecard.score, 5);
+  assert.strictEqual(audit.score, 4);
+  assert.strictEqual(scorecard.score, 4);
   assert.strictEqual(audit.q1, scorecard.q1_status);
   assert.strictEqual(audit.q3, scorecard.q3_status);
   assert.strictEqual(audit.q5, scorecard.q5_status);
@@ -520,16 +519,16 @@ runTest('Test T: Batch processing speed and performance', () => {
 // -------------------------------------------------------------
 runTest('Test U: End-to-end audit accuracy on 10 calls', () => {
   const calls: { text: string; expectedScore: number }[] = [
-    { text: 'WIA01. Buy 100 TCS at CMP. Client: Yes.', expectedScore: 5 },
-    { text: 'WIA02. Buy 50 INFY at 1450. Client: Yes.', expectedScore: 5 },
-    { text: 'WIA03. Buy Reliance at CMP. Client: Yes.', expectedScore: 4 }, // Missing qty
-    { text: 'WIA04. Buy 100 SBIN at CMP. Client: No cancel.', expectedScore: 4 }, // Negated consent
+    { text: 'WIA01. Buy 100 TCS at CMP. Client: Yes.', expectedScore: 4 },
+    { text: 'WIA02. Buy 50 INFY at 1450. Client: Yes.', expectedScore: 4 },
+    { text: 'WIA03. Buy Reliance at CMP. Client: Yes.', expectedScore: 3 }, // Missing qty (non-fatal)
+    { text: 'WIA04. Buy 100 SBIN at CMP. Client: No cancel.', expectedScore: 4 },
     { text: 'WIA05. Buy 100 ITC at CMP. Client: Yes. 100% safe return pakka profit.', expectedScore: 0 }, // Fatal return guarantee
-    { text: 'WIA06. Buy 200 HDFC Bank at 1600. Client: Proceed.', expectedScore: 5 },
-    { text: 'WIA07. Buy 100 Tata Motors at CMP. Client: Okay.', expectedScore: 5 },
-    { text: 'WIA08. Buy 500 Welspun Living at market. Client: Confirm.', expectedScore: 5 },
-    { text: 'WIA09. Buy 100 Axis Bank at CMP. Client: Yes.', expectedScore: 5 },
-    { text: 'WIA10. Buy 10 Maruti at CMP. Client: Done.', expectedScore: 5 },
+    { text: 'WIA06. Buy 200 HDFC Bank at 1600. Client: Proceed.', expectedScore: 4 },
+    { text: 'WIA07. Buy 100 Tata Motors at CMP. Client: Okay.', expectedScore: 4 },
+    { text: 'WIA08. Buy 500 Welspun Living at market. Client: Confirm.', expectedScore: 4 },
+    { text: 'WIA09. Buy 100 Axis Bank at CMP. Client: Yes.', expectedScore: 4 },
+    { text: 'WIA10. Buy 10 Maruti at CMP. Client: Done.', expectedScore: 4 },
   ];
 
   for (const c of calls) {
@@ -567,9 +566,9 @@ runTest('Test V: End-to-end audit accuracy on 25 calls', () => {
     if (isFatal) {
       assert.strictEqual(scoreRes.finalScore, 0);
     } else if (isMissingQty) {
-      assert.strictEqual(scoreRes.finalScore, 4);
+      assert.strictEqual(scoreRes.finalScore, 3);
     } else {
-      assert.strictEqual(scoreRes.finalScore, 5);
+      assert.strictEqual(scoreRes.finalScore, 4);
     }
   }
 });
@@ -590,7 +589,7 @@ runTest('Test W: End-to-end audit accuracy on 50 and 100 calls', () => {
       });
       const { audit } = evaluateEvidenceCompliance(callRec, [], transcript);
       const scoreRes = calculateAuthoritativeScore(audit);
-      assert.strictEqual(scoreRes.finalScore, 5);
+      assert.strictEqual(scoreRes.finalScore, 4);
     }
   }
 });

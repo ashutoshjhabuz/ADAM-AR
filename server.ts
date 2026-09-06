@@ -302,6 +302,19 @@ sqlite.exec(`
     updated_at TEXT NOT NULL
   );
 
+  CREATE TABLE IF NOT EXISTS trade_call_confirmations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    trade_id INTEGER NOT NULL UNIQUE,
+    status TEXT DEFAULT 'pending_call',
+    notification_sent INTEGER DEFAULT 0,
+    notification_date TEXT,
+    notification_message_id TEXT,
+    matched_call_id INTEGER,
+    notes TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+
   CREATE TABLE IF NOT EXISTS audits (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     audit_call_key INTEGER,
@@ -3407,6 +3420,259 @@ ${call.transcript || '(No speech transcript recorded)'}
       ok: true,
       matching: { matched_count: matchedCount, message: `Matching complete: ${matchedCount} record(s) correlated.` },
     });
+  });
+
+  // -----------------------------------------------------------
+  // Trade-First Missing Call Confirmations Work Queue Endpoints
+  // -----------------------------------------------------------
+  apiRouter.get('/work-queues/missing-calls', requireAuth, (req: Request, res: Response) => {
+    try {
+      const rows = sqlite
+        .prepare(`
+          SELECT t.*,
+                 COALESCE(tcc.status, 'pending_call') as confirmation_status,
+                 COALESCE(tcc.notification_sent, 0) as notification_sent,
+                 tcc.notification_date,
+                 tcc.notification_message_id,
+                 tcc.matched_call_id,
+                 tcc.notes,
+                 (
+                   SELECT COUNT(*) FROM matches m
+                   JOIN calls c ON m.call_id = c.id
+                   WHERE m.trade_id = t.id AND m.verification_status = 'confirmed' AND c.call_type = 'pre_order'
+                 ) as confirmed_preorder_match_count
+          FROM trades t
+          LEFT JOIN trade_call_confirmations tcc ON t.id = tcc.trade_id
+          ORDER BY t.id DESC
+        `)
+        .all() as any[];
+
+      const missingCallTrades = rows.filter((r) => r.confirmed_preorder_match_count === 0);
+
+      const stats = {
+        total_missing: missingCallTrades.length,
+        pending_dispatch: missingCallTrades.filter((r) => r.confirmation_status === 'pending_call' && r.notification_sent === 0).length,
+        dispatched: missingCallTrades.filter((r) => r.notification_sent > 0 || r.confirmation_status === 'confirmation_sent').length,
+        exempt: missingCallTrades.filter((r) => r.confirmation_status === 'confirmed_exempt').length,
+      };
+
+      return res.json({
+        ok: true,
+        stats,
+        records: missingCallTrades,
+      });
+    } catch (err: unknown) {
+      return res.status(500).json({ ok: false, error: (err as Error).message });
+    }
+  });
+
+  apiRouter.post('/work-queues/missing-calls/send-confirmation/:tradeId', requireAuth, async (req: Request, res: Response) => {
+    try {
+      const tradeId = parseInt(req.params.tradeId as string, 10);
+      const trade = sqlite.prepare('SELECT * FROM trades WHERE id = ?').get(tradeId) as unknown as TradeRecord | undefined;
+      if (!trade) {
+        return res.status(404).json({ ok: false, error: `Trade #${tradeId} not found.` });
+      }
+
+      const notes = (req.body?.notes as string) || '';
+      const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
+
+      const mailResult = await CALL_MAIL_CONFIRMATION({
+        tradeId: trade.id,
+        callerName: trade.advisor_name || 'Advisor',
+        clientCode: trade.client || 'Client',
+        callingNumber: trade.client_number || trade.phone_number || '—',
+        tradeDate: trade.trade_date || now.slice(0, 10),
+        symbol: trade.symbol || '—',
+        side: trade.side || 'BUY',
+        quantity: trade.quantity || 0,
+        price: trade.price || 0,
+        notes,
+      });
+
+      sqlite
+        .prepare(`
+          INSERT INTO trade_call_confirmations (
+            trade_id, status, notification_sent, notification_date, notification_message_id, notes, created_at, updated_at
+          ) VALUES (?, 'confirmation_sent', 1, ?, ?, ?, ?, ?)
+          ON CONFLICT(trade_id) DO UPDATE SET
+            status = 'confirmation_sent',
+            notification_sent = notification_sent + 1,
+            notification_date = excluded.notification_date,
+            notification_message_id = excluded.notification_message_id,
+            notes = COALESCE(excluded.notes, trade_call_confirmations.notes),
+            updated_at = excluded.updated_at
+        `)
+        .run(trade.id, now, mailResult.messageId || 'LOGGED', notes, now, now);
+
+      addLog('info', 'TRADE_CALL_CONFIRMATION_SENT', `CALL_MAIL_CONFIRMATION sent for Trade #${trade.id} (${trade.symbol} - ${trade.client}). Result: ${mailResult.status}`);
+      backupDatabase();
+
+      return res.json({
+        ok: true,
+        trade_id: trade.id,
+        mail_result: mailResult,
+        message: `Missing call confirmation alert dispatched for Trade #${trade.id}.`,
+      });
+    } catch (err: unknown) {
+      return res.status(500).json({ ok: false, error: (err as Error).message });
+    }
+  });
+
+  apiRouter.post('/work-queues/missing-calls/bulk-send', requireAuth, async (req: Request, res: Response) => {
+    try {
+      const tradeIds = Array.isArray(req.body?.trade_ids) ? (req.body.trade_ids as number[]) : [];
+      if (tradeIds.length === 0) {
+        return res.status(400).json({ ok: false, error: 'No trade IDs provided.' });
+      }
+
+      let sentCount = 0;
+      const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
+
+      for (const tid of tradeIds) {
+        const trade = sqlite.prepare('SELECT * FROM trades WHERE id = ?').get(tid) as unknown as TradeRecord | undefined;
+        if (!trade) continue;
+
+        const mailResult = await CALL_MAIL_CONFIRMATION({
+          tradeId: trade.id,
+          callerName: trade.advisor_name || 'Advisor',
+          clientCode: trade.client || 'Client',
+          callingNumber: trade.client_number || trade.phone_number || '—',
+          tradeDate: trade.trade_date || now.slice(0, 10),
+          symbol: trade.symbol || '—',
+          side: trade.side || 'BUY',
+          quantity: trade.quantity || 0,
+          price: trade.price || 0,
+        });
+
+        sqlite
+          .prepare(`
+            INSERT INTO trade_call_confirmations (
+              trade_id, status, notification_sent, notification_date, notification_message_id, created_at, updated_at
+            ) VALUES (?, 'confirmation_sent', 1, ?, ?, ?, ?)
+            ON CONFLICT(trade_id) DO UPDATE SET
+              status = 'confirmation_sent',
+              notification_sent = notification_sent + 1,
+              notification_date = excluded.notification_date,
+              notification_message_id = excluded.notification_message_id,
+              updated_at = excluded.updated_at
+          `)
+          .run(trade.id, now, mailResult.messageId || 'LOGGED', now, now);
+
+        sentCount++;
+      }
+
+      addLog('info', 'BULK_TRADE_CALL_CONFIRMATION_SENT', `Bulk CALL_MAIL_CONFIRMATION dispatched for ${sentCount} trades without calls.`);
+      backupDatabase();
+
+      return res.json({
+        ok: true,
+        sent_count: sentCount,
+        message: `Successfully dispatched missing call confirmations for ${sentCount} trade(s).`,
+      });
+    } catch (err: unknown) {
+      return res.status(500).json({ ok: false, error: (err as Error).message });
+    }
+  });
+
+  apiRouter.post('/work-queues/missing-calls/link-call', requireAuth, (req: Request, res: Response) => {
+    try {
+      const { trade_id, call_id, notes } = req.body;
+      const tradeId = parseInt(trade_id, 10);
+      const callId = parseInt(call_id, 10);
+
+      const trade = sqlite.prepare('SELECT * FROM trades WHERE id = ?').get(tradeId) as unknown as TradeRecord | undefined;
+      const call = sqlite.prepare('SELECT * FROM calls WHERE id = ?').get(callId) as unknown as CallRecord | undefined;
+
+      if (!trade) return res.status(404).json({ ok: false, error: 'Trade not found.' });
+      if (!call) return res.status(404).json({ ok: false, error: 'Call not found.' });
+
+      const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
+
+      const existingMatch = sqlite.prepare('SELECT id FROM matches WHERE trade_id = ? AND call_id = ?').get(tradeId, callId) as { id: number } | undefined;
+      if (existingMatch) {
+        sqlite
+          .prepare(`
+            UPDATE matches SET
+              status = 'matched',
+              verification_status = 'confirmed',
+              manual_override = 1,
+              reason = 'Manually linked from Missing Call Work Queue',
+              updated_at = ?
+            WHERE id = ?
+          `)
+          .run(now, existingMatch.id);
+      } else {
+        sqlite
+          .prepare(`
+            INSERT INTO matches (
+              call_id, trade_id, confidence, reason, status, manual_override,
+              verification_status, verified_at, created_at, updated_at
+            ) VALUES (?, ?, 1.0, 'Manually linked from Missing Call Work Queue', 'matched', 1, 'confirmed', ?, ?, ?)
+          `)
+          .run(callId, tradeId, now, now, now);
+      }
+
+      sqlite
+        .prepare(`
+          INSERT INTO trade_call_confirmations (
+            trade_id, status, matched_call_id, notes, created_at, updated_at
+          ) VALUES (?, 'call_linked', ?, ?, ?, ?)
+          ON CONFLICT(trade_id) DO UPDATE SET
+            status = 'call_linked',
+            matched_call_id = excluded.matched_call_id,
+            notes = COALESCE(excluded.notes, trade_call_confirmations.notes),
+            updated_at = excluded.updated_at
+        `)
+        .run(tradeId, callId, notes || `Manually linked to Call #${callId}`, now, now);
+
+      if (call.transcript && call.transcript.trim()) {
+        enqueueJob('audit', call.id, `call:${call.id}:audit`);
+      }
+
+      addLog('info', 'TRADE_CALL_LINKED', `Trade #${tradeId} manually linked to Call #${callId}.`);
+      backupDatabase();
+
+      return res.json({
+        ok: true,
+        message: `Trade #${tradeId} successfully linked to Call #${callId}.`,
+      });
+    } catch (err: unknown) {
+      return res.status(500).json({ ok: false, error: (err as Error).message });
+    }
+  });
+
+  apiRouter.post('/work-queues/missing-calls/exempt', requireAuth, (req: Request, res: Response) => {
+    try {
+      const { trade_id, reason } = req.body;
+      const tradeId = parseInt(trade_id, 10);
+      if (!tradeId) return res.status(400).json({ ok: false, error: 'trade_id is required' });
+      if (!reason || !reason.trim()) return res.status(400).json({ ok: false, error: 'Exemption reason is mandatory' });
+
+      const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
+
+      sqlite
+        .prepare(`
+          INSERT INTO trade_call_confirmations (
+            trade_id, status, notes, created_at, updated_at
+          ) VALUES (?, 'confirmed_exempt', ?, ?, ?)
+          ON CONFLICT(trade_id) DO UPDATE SET
+            status = 'confirmed_exempt',
+            notes = excluded.notes,
+            updated_at = excluded.updated_at
+        `)
+        .run(tradeId, reason.trim(), now, now);
+
+      addLog('info', 'TRADE_EXEMPTION_RECORDED', `Trade #${tradeId} marked as exempt: ${reason}`);
+      backupDatabase();
+
+      return res.json({
+        ok: true,
+        message: `Trade #${tradeId} recorded as exempt.`,
+      });
+    } catch (err: unknown) {
+      return res.status(500).json({ ok: false, error: (err as Error).message });
+    }
   });
 
   // -----------------------------------------------------------
