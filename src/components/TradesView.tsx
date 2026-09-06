@@ -1,19 +1,17 @@
 import React, { useState } from 'react';
-import { Upload, TrendingUp, Search, FileSpreadsheet, CheckCircle2, ShieldCheck, ShieldAlert } from 'lucide-react';
+import { Upload, TrendingUp, Search, FileSpreadsheet, CheckCircle2, ShieldCheck } from 'lucide-react';
 import type { TradeRecord } from '../types';
 
 interface TradesViewProps {
   trades: TradeRecord[];
   onUploadTrades: (file: File) => Promise<void>;
   isLoading: boolean;
-  onNavigateToMissingCalls?: () => void;
 }
 
 export const TradesView: React.FC<TradesViewProps> = ({
   trades,
   onUploadTrades,
   isLoading,
-  onNavigateToMissingCalls,
 }) => {
   const [search, setSearch] = useState('');
   const [tradeFile, setTradeFile] = useState<File | null>(null);
@@ -108,27 +106,15 @@ export const TradesView: React.FC<TradesViewProps> = ({
             <p className="text-xs text-neutral-500">Real trade execution data used as factual baseline for matching &amp; Q3 auditing</p>
           </div>
 
-          <div className="flex items-center gap-2">
-            {onNavigateToMissingCalls && (
-              <button
-                type="button"
-                onClick={onNavigateToMissingCalls}
-                className="px-3 py-1.5 bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 rounded-lg text-xs font-bold transition-colors cursor-pointer flex items-center gap-1.5 shrink-0"
-              >
-                <ShieldAlert className="w-3.5 h-3.5 text-amber-600" />
-                <span>Missing Calls Work Queue</span>
-              </button>
-            )}
-            <div className="relative w-full sm:w-72">
-              <Search className="w-3.5 h-3.5 text-neutral-400 absolute left-3 top-1/2 -translate-y-1/2" />
-              <input
-                type="text"
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder="Search by client, symbol, advisor, or phone…"
-                className="w-full pl-8 pr-3 py-1.5 bg-neutral-50 border border-neutral-200 rounded-lg text-xs text-neutral-800 placeholder:text-neutral-400 focus:outline-hidden focus:border-amber-400 focus:ring-1 focus:ring-amber-400"
-              />
-            </div>
+          <div className="relative w-full sm:w-72">
+            <Search className="w-3.5 h-3.5 text-neutral-400 absolute left-3 top-1/2 -translate-y-1/2" />
+            <input
+              type="text"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search by client, symbol, advisor, or phone…"
+              className="w-full pl-8 pr-3 py-1.5 bg-neutral-50 border border-neutral-200 rounded-lg text-xs text-neutral-800 placeholder:text-neutral-400 focus:outline-hidden focus:border-amber-400 focus:ring-1 focus:ring-amber-400"
+            />
           </div>
         </div>
 

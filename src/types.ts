@@ -138,27 +138,6 @@ export interface MatchRecord {
   trade_time?: string;
 }
 
-export interface MissingCallRecord extends TradeRecord {
-  confirmation_status: 'pending_call' | 'confirmation_sent' | 'call_linked' | 'confirmed_exempt';
-  notification_sent: number;
-  notification_date?: string | null;
-  notification_message_id?: string | null;
-  matched_call_id?: number | null;
-  notes?: string | null;
-  confirmed_preorder_match_count?: number;
-}
-
-export interface MissingCallsResponse {
-  ok: boolean;
-  stats: {
-    total_missing: number;
-    pending_dispatch: number;
-    dispatched: number;
-    exempt: number;
-  };
-  records: MissingCallRecord[];
-}
-
 export interface AuditQuestionAnswer {
   status: 'PASS' | 'FAIL';
   evidence: string;

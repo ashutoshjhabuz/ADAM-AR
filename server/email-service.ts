@@ -330,20 +330,13 @@ export async function sendScorecardEmail(options: EmailDispatchOptions): Promise
 }
 
 export interface TradeConfirmationOptions {
-  callId?: number;
-  tradeId?: number;
+  callId: number;
   recordingName?: string;
   callerName?: string;
   clientCode?: string;
   callingNumber?: string;
   registeredNumber?: string;
   callDate?: string;
-  tradeDate?: string;
-  symbol?: string;
-  side?: string;
-  quantity?: number;
-  price?: number;
-  notes?: string;
   transcriptSnippet?: string;
   candidateTrades?: any[];
   recipientEmail?: string;
@@ -358,83 +351,9 @@ export interface TradeConfirmationResult {
 }
 
 /**
- * Renders HTML template for Missing / Unresolved Trade Confirmation (both Call-First and Trade-First)
+ * Renders HTML template for Missing / Unresolved Trade Confirmation
  */
 export function renderTradeConfirmationEmailHtml(options: TradeConfirmationOptions): string {
-  const isTradeFirst = Boolean(options.tradeId && !options.callId);
-
-  if (isTradeFirst) {
-    const {
-      tradeId,
-      callerName = 'Advisor',
-      clientCode = 'Client',
-      callingNumber = '—',
-      tradeDate = new Date().toISOString().slice(0, 10),
-      symbol = '—',
-      side = 'BUY',
-      quantity = 0,
-      price = 0,
-      notes = '',
-    } = options;
-
-    return `
-  <!DOCTYPE html>
-  <html>
-  <head>
-    <meta charset="utf-8">
-    <title>Action Required: Missing Pre-Order Call Confirmation</title>
-  </head>
-  <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background-color: #f8fafc; padding: 20px; margin: 0;">
-    <div style="max-width: 650px; margin: 0 auto; background-color: #ffffff; border-radius: 8px; border: 1px solid #cbd5e1; overflow: hidden;">
-      <div style="background-color: #dc2626; color: #ffffff; padding: 14px 20px; font-weight: bold; font-size: 15px;">
-        ⚠️ Action Required: Executed Trade Missing Pre-Order Call Confirmation
-      </div>
-      <div style="padding: 20px;">
-        <p style="font-size: 13px; color: #334155; margin-top: 0;">
-          The ADAM-AR Automated Compliance Engine detected an executed trade in the back-office trade book (Trade <b>#${tradeId}</b>), but <b>could not find a corresponding pre-order confirmation call recording</b>. Per SEBI regulatory requirements, pre-order telephonic confirmation is mandatory prior to order execution.
-        </p>
-
-        <table style="width: 100%; border-collapse: collapse; font-size: 12px; margin-bottom: 16px;">
-          <tr>
-            <th style="border: 1px solid #cbd5e1; background-color: #f1f5f9; padding: 6px 10px; text-align: left; width: 35%;">Trade Ref ID</th>
-            <td style="border: 1px solid #cbd5e1; padding: 6px 10px; font-family: monospace; font-weight: bold;">Trade #${tradeId}</td>
-          </tr>
-          <tr>
-            <th style="border: 1px solid #cbd5e1; background-color: #f1f5f9; padding: 6px 10px; text-align: left;">Advisor / Dealer</th>
-            <td style="border: 1px solid #cbd5e1; padding: 6px 10px; font-weight: bold;">${callerName}</td>
-          </tr>
-          <tr>
-            <th style="border: 1px solid #cbd5e1; background-color: #f1f5f9; padding: 6px 10px; text-align: left;">Client Code / Phone</th>
-            <td style="border: 1px solid #cbd5e1; padding: 6px 10px; font-family: monospace;">${clientCode} / ${callingNumber}</td>
-          </tr>
-          <tr>
-            <th style="border: 1px solid #cbd5e1; background-color: #f1f5f9; padding: 6px 10px; text-align: left;">Execution Details</th>
-            <td style="border: 1px solid #cbd5e1; padding: 6px 10px; font-weight: bold;">${side} ${quantity} ${symbol} @ ₹${price}</td>
-          </tr>
-          <tr>
-            <th style="border: 1px solid #cbd5e1; background-color: #f1f5f9; padding: 6px 10px; text-align: left;">Trade Date</th>
-            <td style="border: 1px solid #cbd5e1; padding: 6px 10px;">${tradeDate}</td>
-          </tr>
-        </table>
-
-        ${notes ? `<div style="background-color: #fffbeb; border: 1px solid #fef3c7; padding: 10px; border-radius: 6px; font-size: 12px; color: #92400e; margin-bottom: 16px;"><strong>Compliance Remark:</strong> ${notes}</div>` : ''}
-
-        <div style="background-color: #f8fafc; border: 1px solid #e2e8f0; padding: 12px; border-radius: 6px; font-size: 11px; color: #64748b;">
-          <strong>Resolution Instructions:</strong><br/>
-          1. Upload or link the matching call audio recording to clear this exception in the ADAM-AR Work Queue.<br/>
-          2. If the order was received via electronic client portal (app/web) or written authorization, record an exemption note with supporting proof.<br/>
-          3. Unverified executed trades will be reported in the monthly regulatory audit exception log.
-        </div>
-      </div>
-      <div style="background-color: #f1f5f9; padding: 10px 20px; font-size: 11px; color: #94a3b8; text-align: center;">
-        ADAM-AR Compliance Assurance • Regulatory Pre-Order Intelligence
-      </div>
-    </div>
-  </body>
-  </html>
-    `;
-  }
-
   const {
     callId,
     recordingName = 'Unknown Recording',
@@ -540,14 +459,12 @@ export function renderTradeConfirmationEmailHtml(options: TradeConfirmationOptio
 }
 
 /**
- * Dispatches trade confirmation request email (supports both Call-First and Trade-First).
+ * Dispatches trade confirmation request email when a pre-order call has no exact trade match.
  */
 export async function CALL_MAIL_CONFIRMATION(options: TradeConfirmationOptions): Promise<TradeConfirmationResult> {
   const recipient = options.recipientEmail || process.env.COMPLIANCE_HEAD_EMAIL || DEFAULT_SENDER_EMAIL;
   const html = renderTradeConfirmationEmailHtml(options);
-  const subject = options.tradeId && !options.callId
-    ? `[ACTION REQUIRED] Missing Pre-Order Call Confirmation for Trade #${options.tradeId} (${options.symbol || 'Trade'} - ${options.clientCode || 'Client'})`
-    : `[ACTION REQUIRED] Missing Trade Confirmation for Pre-Order Call #${options.callId} (${options.callerName || 'Advisor'})`;
+  const subject = `[ACTION REQUIRED] Missing Trade Confirmation for Pre-Order Call #${options.callId} (${options.callerName || 'Advisor'})`;
 
   try {
     const transporter = createMailTransporter(options.smtpConfig);

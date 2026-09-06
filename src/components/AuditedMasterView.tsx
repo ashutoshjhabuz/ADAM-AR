@@ -119,7 +119,7 @@ export const AuditedMasterView: React.FC<AuditedMasterViewProps> = ({
     q2_status: 'PASS',
     q3_status: 'PASS',
     q5_status: 'PASS',
-    score: 4,
+    score: 5,
     feedback: 'Pre Order Confirmation verified as per standard procedure.',
   });
 
@@ -136,9 +136,9 @@ export const AuditedMasterView: React.FC<AuditedMasterViewProps> = ({
         q1_status: 'PASS',
         q2_status: 'PASS',
         q3_status: 'PASS',
-        q4_status: 'NOT_AUDITED',
+        q4_status: 'PASS',
         q5_status: 'PASS',
-        score: 4,
+        score: 5,
         feedback: '',
         is_dirty: false,
       };
@@ -170,9 +170,9 @@ export const AuditedMasterView: React.FC<AuditedMasterViewProps> = ({
       q1_status: sc.q1_status || 'PASS',
       q2_status: sc.q2_status || 'PASS',
       q3_status: sc.q3_status || 'PASS',
-      q4_status: 'NOT_AUDITED',
+      q4_status: 'PASS',
       q5_status: sc.q5_status || 'PASS',
-      score: typeof sc.score === 'number' ? sc.score : 4,
+      score: typeof sc.score === 'number' ? sc.score : 5,
       feedback: String(sc.audit_comment || ''),
       is_dirty: false,
     };
@@ -202,10 +202,10 @@ export const AuditedMasterView: React.FC<AuditedMasterViewProps> = ({
         updated.score = 0;
         updated.feedback = 'NON-COMPLIANT: Pre-order audit standard violation.';
       } else {
-        let scMark = 4;
+        let scMark = 5;
         if (q3 !== 'PASS') scMark -= 1;
         updated.score = scMark;
-        updated.feedback = scMark === 4 
+        updated.feedback = scMark === 5 
           ? 'Pre Order Confirmation verified as per standard procedure.' 
           : 'Pre Order Confirmation verified with minor trade remarks.';
       }
@@ -336,7 +336,7 @@ export const AuditedMasterView: React.FC<AuditedMasterViewProps> = ({
         q2_status: 'PASS',
         q3_status: 'PASS',
         q5_status: 'PASS',
-        score: 4,
+        score: 5,
         feedback: 'Pre Order Confirmation is as per the Regulatory Norm.',
       });
       setActionMessage('New audit entry created successfully.');
@@ -1008,14 +1008,14 @@ export const AuditedMasterView: React.FC<AuditedMasterViewProps> = ({
                       <td className="py-2 px-3 text-center whitespace-nowrap">
                         <span
                           className={`inline-block px-2 py-0.5 rounded-md font-bold text-xs ${
-                            state.score === 4
+                            state.score === 5
                               ? 'bg-emerald-100 text-emerald-900 border border-emerald-300'
-                              : state.score === 3
+                              : state.score >= 4
                               ? 'bg-amber-100 text-amber-900 border border-amber-300'
                               : 'bg-rose-100 text-rose-900 border border-rose-300 font-extrabold'
                           }`}
                         >
-                          {state.score} / 4
+                          {state.score} / 5
                         </span>
                       </td>
 
@@ -1225,12 +1225,12 @@ export const AuditedMasterView: React.FC<AuditedMasterViewProps> = ({
             <div className="p-3 bg-neutral-900 text-white rounded-xl flex items-center justify-between">
               <div>
                 <div className="text-xs text-neutral-400">Official Evaluation Rating</div>
-                <div className="text-sm font-bold text-amber-400">Score: {activeModalItem.score} / 4 Marks</div>
+                <div className="text-sm font-bold text-amber-400">Score: {activeModalItem.score} / 5 Points</div>
               </div>
               <div className="text-right">
                 <div className="text-xs text-neutral-400">Audit Status</div>
                 <div className={`text-xs font-bold ${activeModalItem.score >= 4 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                  {activeModalItem.score >= 4 ? 'AUDIT COMPLIANT (4/4)' : activeModalItem.score > 0 ? 'PARTIAL COMPLIANT (3/4)' : 'NON-COMPLIANT (0/4)'}
+                  {activeModalItem.score >= 4 ? 'AUDIT COMPLIANT' : 'AUDIT DEFICIENT'}
                 </div>
               </div>
             </div>

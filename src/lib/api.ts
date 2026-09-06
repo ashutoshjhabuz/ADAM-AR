@@ -11,7 +11,6 @@ import type {
   SystemIntegrations,
   UserProfile,
   FailedJobItem,
-  MissingCallsResponse,
 } from '../types';
 
 export const AUTH_TOKEN_KEY = 'auditeq_auth_token';
@@ -298,38 +297,4 @@ export const api = {
     const token = getStoredToken();
     return `/api/admin/cleared-backups/${id}/download?token=${encodeURIComponent(token || '')}`;
   },
-
-  // Trade-First Missing Call Confirmations Work Queue
-  getMissingCallsWorkQueue: () =>
-    apiRequest<MissingCallsResponse>('/api/work-queues/missing-calls'),
-  sendMissingCallConfirmation: (tradeId: number, notes?: string) =>
-    apiRequest<{ ok: boolean; trade_id: number; mail_result: any; message: string }>(
-      `/api/work-queues/missing-calls/send-confirmation/${tradeId}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ notes }),
-      }
-    ),
-  bulkSendMissingCallConfirmations: (tradeIds: number[]) =>
-    apiRequest<{ ok: boolean; sent_count: number; message: string }>(
-      '/api/work-queues/missing-calls/bulk-send',
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ trade_ids: tradeIds }),
-      }
-    ),
-  linkCallToTrade: (tradeId: number, callId: number, notes?: string) =>
-    apiRequest<{ ok: boolean; message: string }>('/api/work-queues/missing-calls/link-call', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ trade_id: tradeId, call_id: callId, notes }),
-    }),
-  exemptTradeFromCall: (tradeId: number, reason: string) =>
-    apiRequest<{ ok: boolean; message: string }>('/api/work-queues/missing-calls/exempt', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ trade_id: tradeId, reason }),
-    }),
 };
