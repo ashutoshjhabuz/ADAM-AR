@@ -31,7 +31,7 @@ import {
   evaluateMatchingDecision,
   findCompletePreOrderTrades,
 } from './server/matcher';
-import { classifyCallIntent } from './server/classifier';
+import { classifyCallIntent, hasCompletePreOrderEvidence } from './server/classifier';
 import { evaluateDeterministicQ1 } from './server/q1-evaluator';
 import { evaluateDeterministicQ3 } from './server/q3-evaluator';
 import { transcribeWithMultiPassEnsemble } from './server/ensemble-transcriber';
@@ -1812,7 +1812,7 @@ async function claimAndProcessNextJob(): Promise<boolean> {
 
       // Intent & Category Classification Step (pre_order vs regular vs scrap)
       const callDuration = call.duration_seconds || detectedDuration;
-      const classification = classifyCallIntent(transcript, callDuration);
+      const classification = classifyCallIntent(transcript, callDuration, allTrades);
 
       sqlite
         .prepare(`
@@ -1841,7 +1841,7 @@ async function claimAndProcessNextJob(): Promise<boolean> {
       const match = classification.call_type === 'scrap' ? null : runMatchingForCall(call.id);
       const finalCallType = classification.call_type === 'scrap'
         ? 'scrap'
-        : match?.status === 'matched' ? 'pre_order' : 'regular';
+        : hasCompletePreOrderEvidence(transcript, allTrades) || match?.status === 'matched' ? 'pre_order' : classification.call_type;
       sqlite.prepare('UPDATE calls SET call_type = ?, updated_at = ? WHERE id = ?').run(
         finalCallType,
         now,
@@ -2519,16 +2519,17 @@ ${call.transcript || '(No speech transcript recorded)'}
   apiRouter.post('/calls/classify-all', requireAuth, (_req: Request, res: Response) => {
     try {
       const calls = sqlite.prepare('SELECT * FROM calls').all() as unknown as CallRecord[];
+      const trades = sqlite.prepare('SELECT * FROM trades').all() as unknown as TradeRecord[];
       let updatedCount = 0;
       const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
 
       sqlite.exec('BEGIN TRANSACTION;');
       for (const c of calls) {
-        const classification = classifyCallIntent(c.transcript, c.duration_seconds);
+        const classification = classifyCallIntent(c.transcript, c.duration_seconds, trades);
         const match = classification.call_type === 'scrap' ? null : runMatchingForCall(c.id);
         const callType = classification.call_type === 'scrap'
           ? 'scrap'
-          : match?.status === 'matched' ? 'pre_order' : 'regular';
+          : hasCompletePreOrderEvidence(c.transcript, trades) || match?.status === 'matched' ? 'pre_order' : classification.call_type;
         const evidence = match?.status === 'matched'
           ? 'Transcript contains the matched client code, stock, quantity, and price/CMP.'
           : classification.evidence;
@@ -2917,7 +2918,8 @@ ${call.transcript || '(No speech transcript recorded)'}
           transcript = fallbackRes.transcript;
           model = fallbackRes.model;
         }
-        const classification = classifyCallIntent(transcript, call.duration_seconds);
+        const allTrades = sqlite.prepare('SELECT * FROM trades').all() as unknown as TradeRecord[];
+        const classification = classifyCallIntent(transcript, call.duration_seconds, allTrades);
         sqlite
           .prepare("UPDATE calls SET transcript = ?, transcript_model = ?, call_type = ?, preorder_evidence = ?, status = 'transcribed' WHERE id = ?")
           .run(transcript, model, classification.call_type, classification.evidence, call.id);
@@ -4380,6 +4382,27 @@ ${call.transcript || '(No speech transcript recorded)'}
   // Pipeline Automation Trigger (Deduplicated Job Enqueueing)
   // -----------------------------------------------------------
   apiRouter.post('/pipeline/start', requireAuth, async (_req: Request, res: Response) => {
+    const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
+
+    // Recover jobs left behind by a crashed server, expired lease, or an
+    // exhausted ASR retry cycle before calculating the queue size.
+    sqlite.prepare(`
+      UPDATE jobs SET
+        status = 'queued', attempts = 0, available_at = NULL,
+        locked_at = NULL, locked_by = NULL, lease_until = NULL,
+        last_error = NULL, updated_at = ?
+      WHERE status = 'failed'
+        OR (status = 'processing' AND job_type = 'transcribe')
+    `).run(now);
+    sqlite.prepare(`
+      UPDATE calls SET status = 'imported', updated_at = ?
+      WHERE status = 'failed'
+        AND EXISTS (
+          SELECT 1 FROM jobs j
+          WHERE j.entity_id = calls.id AND j.job_type = 'transcribe' AND j.status = 'queued'
+        )
+    `).run(now);
+
     const unTranscribed = sqlite.prepare("SELECT id FROM calls WHERE status != 'transcribed'").all() as { id: number }[];
     let queuedCount = 0;
 

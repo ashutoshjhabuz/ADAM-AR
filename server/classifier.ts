@@ -1,3 +1,7 @@
+import { extractSpokenEvidence } from './evidence-extractor';
+import { matchClientCodeInTranscript, matchPriceInTranscript, matchQuantityInTranscript, matchSymbolInTranscript, mentionsMarketPriceOrCMP } from './normalizer';
+import type { TradeRecord } from '../src/types';
+
 // =============================================================
 // AuditEQ v17.0.30 — Call Intent & Category Classifier Engine
 // Categorizes:
@@ -14,6 +18,31 @@ export interface PreOrderClassificationResult {
   evidence: string;
   reason: string;
   is_scrap?: boolean;
+}
+
+/**
+ * Pre-order classification is based on the four entities spoken in the call,
+ * not on isolated words such as "buy", "quantity", or "target".
+ */
+export function hasCompletePreOrderEvidence(transcript?: string | null, referenceTrades: TradeRecord[] = []): boolean {
+  if (!transcript || transcript.trim().length < 10) return false;
+
+  if (referenceTrades.some((trade) => {
+    if (!trade.client || !trade.symbol || !trade.quantity || !trade.price) return false;
+    return matchClientCodeInTranscript(trade.client, transcript).matched &&
+      matchSymbolInTranscript(trade.symbol, transcript).matched &&
+      matchQuantityInTranscript(trade.quantity, transcript) &&
+      (matchPriceInTranscript(trade.price, transcript) || mentionsMarketPriceOrCMP(transcript));
+  })) return true;
+
+  const evidence = extractSpokenEvidence(transcript);
+  const hasClientCode = Boolean(evidence.detectedClientCode);
+  const hasStock = evidence.detectedSymbols.length > 0 ||
+    /\b(?:nifty|bank\s*nifty|finnifty|sensex|mcx|stock|scrip|script)\b/i.test(transcript) ||
+    /\b[A-Z]{2,}(?:[-/]?[A-Z0-9]{2,})?\b/.test(transcript);
+  const hasQuantity = evidence.detectedQuantities.length > 0;
+  const hasPrice = evidence.hasCmpMention || evidence.detectedPrices.length > 0;
+  return hasClientCode && hasStock && hasQuantity && hasPrice;
 }
 
 // 1. Pre-order affirmative indicators (indicates order placement instructions before trade)
@@ -53,7 +82,8 @@ const SCRAP_VOICEMAIL_TERMS = [
  */
 export function classifyCallIntent(
   transcript?: string | null,
-  durationSeconds?: number
+  durationSeconds?: number,
+  referenceTrades: TradeRecord[] = []
 ): PreOrderClassificationResult {
   // Check 1: Duration <= 6 seconds is definitely a SCRAP call per user specification
   if (durationSeconds !== undefined && durationSeconds > 0 && durationSeconds <= 6) {
@@ -68,7 +98,7 @@ export function classifyCallIntent(
 
   if (!transcript || transcript.trim().length < 10) {
     // If no transcript or very short:
-    if (durationSeconds !== undefined && durationSeconds > 0 && durationSeconds <= 10) {
+    if (durationSeconds !== undefined && durationSeconds > 0 && durationSeconds <= 6) {
       return {
         call_type: 'scrap',
         confidence: 0.90,
@@ -78,15 +108,23 @@ export function classifyCallIntent(
       };
     }
     return {
-      call_type: 'scrap',
-      confidence: 0.70,
-      evidence: 'Audio transcript empty or too short for trading intent.',
-      reason: 'Potential scrap call or un-transcribed recording.',
-      is_scrap: true,
+      call_type: 'review',
+      confidence: 0.40,
+      evidence: 'Transcript is missing or too short for reliable categorization.',
+      reason: 'Pending transcription review; calls over 6 seconds are never classified as scrap.',
     };
   }
 
   const text = transcript.toLowerCase();
+
+  if (hasCompletePreOrderEvidence(transcript, referenceTrades)) {
+    return {
+      call_type: 'pre_order',
+      confidence: 0.99,
+      evidence: 'Transcript contains client code, stock/index/contract, quantity/lot, and price/CMP.',
+      reason: 'Complete pre-order entity set detected in the spoken transcript.',
+    };
+  }
 
   // Check 2: Voicemail / Automated system recording
   for (const vmTerm of SCRAP_VOICEMAIL_TERMS) {
@@ -101,17 +139,6 @@ export function classifyCallIntent(
     }
   }
 
-  // Count Pre-Order hits
-  let preOrderHits = 0;
-  const matchedPreOrderTerms: string[] = [];
-  for (const term of PRE_ORDER_TERMS) {
-    const regex = new RegExp(`\\b${term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
-    if (regex.test(text)) {
-      preOrderHits++;
-      matchedPreOrderTerms.push(term);
-    }
-  }
-
   // Count Regular Call hits
   let regularHits = 0;
   const matchedRegularTerms: string[] = [];
@@ -123,19 +150,8 @@ export function classifyCallIntent(
     }
   }
 
-  // Decision Logic:
-  // 1. Explicit pre-order cues with buying/selling/order execution intent
-  if (preOrderHits > 0 && (preOrderHits >= regularHits || preOrderHits >= 2)) {
-    return {
-      call_type: 'pre_order',
-      confidence: Math.min(0.98, 0.75 + preOrderHits * 0.05),
-      evidence: `Pre-order trading markers identified: "${matchedPreOrderTerms.slice(0, 4).join('", "')}"`,
-      reason: 'Call contains explicit pre-trade instructions, stock order parameters, or execution confirmation.',
-    };
-  }
-
-  // 2. Regular call: advisor talking about stock market, recommendation, or issues without buying/selling
-  if (regularHits > 0 && preOrderHits === 0) {
+  // Any transcript without the complete four-entity set is regular dialogue.
+  if (regularHits > 0) {
     return {
       call_type: 'regular',
       confidence: Math.min(0.95, 0.75 + regularHits * 0.05),
@@ -144,16 +160,6 @@ export function classifyCallIntent(
     };
   }
 
-  if (preOrderHits > 0) {
-    return {
-      call_type: 'pre_order',
-      confidence: 0.80,
-      evidence: `Pre-order trading markers: "${matchedPreOrderTerms.join('", "')}"`,
-      reason: 'Pre-order order execution parameters detected.',
-    };
-  }
-
-  // Default to regular call if speech exists but no orders placed
   return {
     call_type: 'regular',
     confidence: 0.70,
