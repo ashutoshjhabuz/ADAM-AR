@@ -29,7 +29,6 @@ import {
 import {
   scoreTradeCandidates,
   evaluateMatchingDecision,
-  findCompletePreOrderTrades,
 } from './server/matcher';
 import { classifyCallIntent, hasCompletePreOrderEvidence } from './server/classifier';
 import { evaluateDeterministicQ1 } from './server/q1-evaluator';
@@ -1293,7 +1292,7 @@ async function transcribeWithGroq(filePath: string, filename: string): Promise<{
     throw new Error(`Audio recording file not found on disk at "${filePath}".`);
   }
 
-  const asrRes = await transcribeAudioFile(filePath, getGroqKey(), process.env.GEMINI_API_KEY);
+  const asrRes = await transcribeAudioFile(filePath, getGroqKey(), getGeminiKey());
   return {
     transcript: asrRes.transcript,
     model: asrRes.modelUsed,
@@ -1542,10 +1541,12 @@ function resolveAuthoritativeContextForCall(callId: number): {
   } else {
     // 2. Perform authoritative matching without arbitrary array fallbacks
     const allTrades = sqlite.prepare('SELECT * FROM trades').all() as unknown as TradeRecord[];
-    const eligibleTrades = findCompletePreOrderTrades(call, allTrades);
-    const candidates = scoreTradeCandidates(call, eligibleTrades);
+    const candidates = scoreTradeCandidates(call, allTrades);
     const decision = evaluateMatchingDecision(candidates);
-    resolvedTrade = decision.matchStatus === 'matched' ? decision.bestTrade : null;
+    // A best candidate is useful audit context even when the correlation is
+    // ambiguous. It is never treated as a confirmed match unless the matcher
+    // explicitly returns `matched`.
+    resolvedTrade = decision.bestTrade;
   }
 
   // Derive client code from call metadata or resolved trade (never from arbitrary trade[0])
@@ -1595,24 +1596,17 @@ function calculateScoreAndPersistScorecard(
 function runMatchingForCall(callId: number): MatchRecord | null {
   const call = sqlite.prepare('SELECT * FROM calls WHERE id = ?').get(callId) as unknown as CallRecord | undefined;
   if (!call) return null;
+  if (call.call_type !== 'pre_order') return null;
 
   const trades = sqlite.prepare('SELECT * FROM trades').all() as unknown as TradeRecord[];
   if (trades.length === 0) return null;
 
   // Non-order conversations must never create a match or enter the audit queue.
-  const eligibleTrades = findCompletePreOrderTrades(call, trades);
-  if (eligibleTrades.length === 0) {
-    sqlite.prepare('DELETE FROM matches WHERE call_id = ?').run(call.id);
-    sqlite.prepare("UPDATE calls SET call_type = 'regular' WHERE id = ?").run(call.id);
-    return null;
-  }
-
-  const candidates = scoreTradeCandidates(call, eligibleTrades);
+  const candidates = scoreTradeCandidates(call, trades);
   const decision = evaluateMatchingDecision(candidates);
 
   if (!decision.bestTrade || decision.matchStatus !== 'matched') {
     sqlite.prepare('DELETE FROM matches WHERE call_id = ?').run(call.id);
-    sqlite.prepare("UPDATE calls SET call_type = 'regular' WHERE id = ?").run(call.id);
     return null;
   }
 
@@ -1794,7 +1788,7 @@ async function claimAndProcessNextJob(): Promise<boolean> {
         const asrRes = await transcribeAudioFile(
           call.storage_path || '',
           getGroqKey(),
-          process.env.GEMINI_API_KEY,
+          getGeminiKey(),
           matchedTrade
         );
         transcript = asrRes.transcript;
@@ -1804,10 +1798,10 @@ async function claimAndProcessNextJob(): Promise<boolean> {
         addLog('info', 'ASR_COMPLETE', `ASR complete for Call #${call.id} using ${model}. Duration: ${detectedDuration}s.`);
       } catch (asrErr: unknown) {
         addLog('warning', 'ASR_FALLBACK', `Primary ASR encountered notice: ${(asrErr as Error).message}. Attempting fallback.`);
-        const fallbackRes = await transcribeWithGroq(call.storage_path || '', call.recording_name);
-        transcript = fallbackRes.transcript;
-        rawTranscript = fallbackRes.transcript;
-        model = fallbackRes.model;
+        // transcribeAudioFile already performs its configured fallback and
+        // secondary verification. Retrying the same pipeline here doubles
+        // latency and can create duplicate rate-limit failures.
+        throw asrErr;
       }
 
       // Intent & Category Classification Step (pre_order vs regular vs scrap)
@@ -1847,10 +1841,10 @@ async function claimAndProcessNextJob(): Promise<boolean> {
         now,
         call.id
       );
-      if (match?.status === 'matched') {
+      if (finalCallType === 'pre_order') {
         enqueueJob('audit', call.id, `call:${call.id}:audit`);
       } else {
-        addLog('info', 'CALL_FILTERED', `Call #${call.id} is not a confirmed pre-order/trade match. Bypassing trade compliance audit.`);
+        addLog('info', 'CALL_FILTERED', `Call #${call.id} classified as "${finalCallType}". Bypassing trade compliance audit.`);
       }
 
     } else if (job.job_type === 'audit') {
@@ -1858,8 +1852,7 @@ async function claimAndProcessNextJob(): Promise<boolean> {
       if (!call) throw new Error(`Call #${job.entity_id} not found.`);
 
       // MANDATE: Only pre-order calls enter trade compliance auditing
-      const { resolvedTrade: auditTrade } = resolveAuthoritativeContextForCall(call.id);
-      if (call.call_type !== 'pre_order' || !auditTrade) {
+      if (call.call_type !== 'pre_order') {
         addLog('info', 'AUDIT_SKIPPED', `Call #${call.id} classified as "${call.call_type}". Only pre-order calls enter trade audit.`);
         sqlite.prepare("UPDATE calls SET status = 'regular_closed', updated_at = ? WHERE id = ?").run(now, call.id);
         sqlite.prepare("UPDATE jobs SET status = 'completed', locked_at = NULL, locked_by = NULL, updated_at = ? WHERE id = ?").run(now, job.id);
@@ -2907,7 +2900,7 @@ ${call.transcript || '(No speech transcript recorded)'}
             call.storage_path || '',
             call.recording_name,
             getGroqKey(),
-            process.env.GEMINI_API_KEY,
+            getGeminiKey(),
             matchedTrade,
             call.client
           );
@@ -3024,7 +3017,8 @@ ${call.transcript || '(No speech transcript recorded)'}
       for (const c of calls) {
         const m = runMatchingForCall(c.id);
         if (m) matchesTriggered++;
-        if (m?.status === 'matched') {
+        const updatedCall = sqlite.prepare('SELECT call_type FROM calls WHERE id = ?').get(c.id) as { call_type?: string } | undefined;
+        if (updatedCall?.call_type === 'pre_order') {
           enqueueJob('audit', c.id, `call:${c.id}:audit`);
           auditsTriggered++;
         }
@@ -3297,8 +3291,6 @@ ${call.transcript || '(No speech transcript recorded)'}
 
         runMatchingForCall(call.id);
         const { resolvedTrade, clientCode } = resolveAuthoritativeContextForCall(call.id);
-        if (!resolvedTrade) continue;
-
         const auditResult = await auditWithGroq(call, resolvedTrade, clientCode);
         let auditId = audit?.id;
 
@@ -4403,7 +4395,27 @@ ${call.transcript || '(No speech transcript recorded)'}
         )
     `).run(now);
 
-    const unTranscribed = sqlite.prepare("SELECT id FROM calls WHERE status != 'transcribed'").all() as { id: number }[];
+    // Repair categorization for transcripts produced before the current
+    // entity-based classifier. This makes Start / Refresh idempotent for an
+    // existing batch instead of only handling newly imported recordings.
+    const completedCalls = sqlite.prepare("SELECT * FROM calls WHERE transcript IS NOT NULL AND transcript != ''").all() as unknown as CallRecord[];
+    const trades = sqlite.prepare('SELECT * FROM trades').all() as unknown as TradeRecord[];
+    let reclassifiedCount = 0;
+    for (const call of completedCalls) {
+      const classification = classifyCallIntent(call.transcript, call.duration_seconds, trades);
+      const finalCallType = classification.call_type === 'scrap'
+        ? 'scrap'
+        : hasCompletePreOrderEvidence(call.transcript, trades) ? 'pre_order' : classification.call_type;
+      sqlite.prepare('UPDATE calls SET call_type = ?, preorder_confidence = ?, preorder_evidence = ?, updated_at = ? WHERE id = ?')
+        .run(finalCallType, classification.confidence, classification.evidence, now, call.id);
+      if (finalCallType === 'pre_order') {
+        runMatchingForCall(call.id);
+        enqueueJob('audit', call.id, `call:${call.id}:audit`);
+      }
+      reclassifiedCount++;
+    }
+
+    const unTranscribed = sqlite.prepare("SELECT id FROM calls WHERE status IN ('imported', 'failed')").all() as { id: number }[];
     let queuedCount = 0;
 
     for (const c of unTranscribed) {
@@ -4413,7 +4425,7 @@ ${call.transcript || '(No speech transcript recorded)'}
     }
 
     addLog('info', 'PIPELINE_STARTED', `Production pipeline triggered. ${queuedCount} transcription job(s) queued.`);
-    return res.json({ ok: true, message: `Pipeline started. ${queuedCount} job(s) queued for processing.` });
+    return res.json({ ok: true, message: `Pipeline started. Reclassified ${reclassifiedCount} transcript(s) and queued ${queuedCount} transcription job(s).` });
   });
 
   // -----------------------------------------------------------

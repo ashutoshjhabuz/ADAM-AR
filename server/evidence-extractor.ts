@@ -98,7 +98,29 @@ export function extractSpokenEvidence(
   let detectedClientCode: SpokenEvidenceItem | undefined;
   const clientCodeRegex = /\b([a-zA-Z]{2,4}\s*(?:-|\s)?\s*\d{4,7})\b/g;
   let codeMatch: RegExpExecArray | null;
-  while ((codeMatch = clientCodeRegex.exec(transcript)) !== null) {
+  if (referenceTrade?.client) {
+    const normRef = normalizeClientCode(referenceTrade.client);
+    const pattern = normRef.split('').join('[\\s\\-_]*');
+    const spokenMatch = transcript.match(new RegExp(`\\b${pattern}\\b`, 'i'));
+    if (spokenMatch) {
+      const ts = findTimestamps(spokenMatch[0]);
+      detectedClientCode = {
+        id: nextId('client_id'),
+        field: 'client_id',
+        value: spokenMatch[0],
+        normalized_value: normRef,
+        exact_quote: spokenMatch[0],
+        speaker: ts.speaker,
+        timestamp_start: ts.start,
+        timestamp_end: ts.end,
+        source: 'primary_asr',
+        confidence: 0.99,
+      };
+      evidenceItems.push(detectedClientCode);
+    }
+  }
+
+  while (!detectedClientCode && (codeMatch = clientCodeRegex.exec(transcript)) !== null) {
     const rawMatch = codeMatch[0];
     const norm = normalizeClientCode(rawMatch);
     if (norm.length >= 5) {
@@ -117,30 +139,6 @@ export function extractSpokenEvidence(
       };
       evidenceItems.push(item);
       if (!detectedClientCode) detectedClientCode = item;
-    }
-  }
-
-  // Also check if reference trade client code exists with spoken spacing
-  if (!detectedClientCode && referenceTrade?.client) {
-    const normRef = normalizeClientCode(referenceTrade.client);
-    const pattern = normRef.split('').join('[\\s\\-_]*');
-    const reg = new RegExp(`\\b${pattern}\\b`, 'i');
-    const spokenMatch = transcript.match(reg);
-    if (spokenMatch) {
-      const ts = findTimestamps(spokenMatch[0]);
-      detectedClientCode = {
-        id: nextId('client_id'),
-        field: 'client_id',
-        value: spokenMatch[0],
-        normalized_value: normRef,
-        exact_quote: spokenMatch[0],
-        speaker: ts.speaker,
-        timestamp_start: ts.start,
-        timestamp_end: ts.end,
-        source: 'primary_asr',
-        confidence: 0.92,
-      };
-      evidenceItems.push(detectedClientCode);
     }
   }
 
