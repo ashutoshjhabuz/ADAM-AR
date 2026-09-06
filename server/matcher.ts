@@ -10,7 +10,9 @@ import {
   matchSymbolInTranscript,
   matchPriceInTranscript,
   matchQuantityInTranscript,
+  normalizeSpokenNumbers,
 } from './normalizer';
+import { extractSpokenEvidence } from './evidence-extractor';
 
 export interface ScoredCandidate {
   trade: TradeRecord;
@@ -37,15 +39,39 @@ export function isCompletePreOrderMatch(call: CallRecord, trade: TradeRecord): b
   const transcript = call.transcript || '';
   if (!transcript) return false;
 
-  const hasClientCode = Boolean(trade.client && matchClientCodeInTranscript(trade.client, transcript).matched);
-  const hasSymbol = Boolean(trade.symbol && matchSymbolInTranscript(trade.symbol, transcript).matched);
-  const hasQuantity = Boolean(trade.quantity && trade.quantity > 0 && matchQuantityInTranscript(trade.quantity, transcript));
+  const normalizedTranscript = normalizeSpokenNumbers(transcript);
+  const evidence = extractSpokenEvidence(transcript, [], trade);
+
+  const hasClientCode = Boolean(
+    trade.client && (
+      matchClientCodeInTranscript(trade.client, transcript).matched ||
+      evidence.detectedClientCode?.normalized_value === normalizeClientCode(trade.client)
+    )
+  );
+  const hasSymbol = Boolean(trade.symbol && (
+    matchSymbolInTranscript(trade.symbol, transcript).matched ||
+    evidence.detectedSymbols.some((item) => String(item.normalized_value).toUpperCase() === trade.symbol.toUpperCase())
+  ));
+  const hasQuantity = Boolean(
+    trade.quantity && trade.quantity > 0 && (
+      matchQuantityInTranscript(trade.quantity, normalizedTranscript) ||
+      evidence.detectedQuantities.some((item) => Number(item.normalized_value) === Number(trade.quantity))
+    )
+  );
   const hasPrice = Boolean(
-    (trade.price && trade.price > 0 && matchPriceInTranscript(trade.price, transcript)) ||
+    (trade.price && trade.price > 0 && (
+      matchPriceInTranscript(trade.price, normalizedTranscript) ||
+      evidence.detectedPrices.some((item) => Number(item.normalized_value) === Number(trade.price))
+    )) ||
+    evidence.hasCmpMention ||
     /\b(?:cmp|current\s+market\s+price|market\s+(?:price|rate)|bhav(?:\s+pe)?)\b/i.test(transcript)
   );
 
   return hasClientCode && hasSymbol && hasQuantity && hasPrice;
+}
+
+export function findCompletePreOrderTrades(call: CallRecord, trades: TradeRecord[]): TradeRecord[] {
+  return trades.filter((trade) => isCompletePreOrderMatch(call, trade));
 }
 
 /**

@@ -29,7 +29,7 @@ import {
 import {
   scoreTradeCandidates,
   evaluateMatchingDecision,
-  isCompletePreOrderMatch,
+  findCompletePreOrderTrades,
 } from './server/matcher';
 import { classifyCallIntent } from './server/classifier';
 import { evaluateDeterministicQ1 } from './server/q1-evaluator';
@@ -1542,7 +1542,7 @@ function resolveAuthoritativeContextForCall(callId: number): {
   } else {
     // 2. Perform authoritative matching without arbitrary array fallbacks
     const allTrades = sqlite.prepare('SELECT * FROM trades').all() as unknown as TradeRecord[];
-    const eligibleTrades = allTrades.filter((trade) => isCompletePreOrderMatch(call, trade));
+    const eligibleTrades = findCompletePreOrderTrades(call, allTrades);
     const candidates = scoreTradeCandidates(call, eligibleTrades);
     const decision = evaluateMatchingDecision(candidates);
     resolvedTrade = decision.matchStatus === 'matched' ? decision.bestTrade : null;
@@ -1600,7 +1600,7 @@ function runMatchingForCall(callId: number): MatchRecord | null {
   if (trades.length === 0) return null;
 
   // Non-order conversations must never create a match or enter the audit queue.
-  const eligibleTrades = trades.filter((trade) => isCompletePreOrderMatch(call, trade));
+  const eligibleTrades = findCompletePreOrderTrades(call, trades);
   if (eligibleTrades.length === 0) {
     sqlite.prepare('DELETE FROM matches WHERE call_id = ?').run(call.id);
     sqlite.prepare("UPDATE calls SET call_type = 'regular' WHERE id = ?").run(call.id);
@@ -1838,9 +1838,12 @@ async function claimAndProcessNextJob(): Promise<boolean> {
       addLog('info', 'WORKER_TRANSCRIBE_COMPLETE', `Transcription and classification finished for Call #${call.id} (${classification.call_type}).`);
 
       // Only pre_order calls enter trade matching & compliance audit workflow
-      const match = classification.call_type === 'pre_order' ? runMatchingForCall(call.id) : null;
+      const match = classification.call_type === 'scrap' ? null : runMatchingForCall(call.id);
+      const finalCallType = classification.call_type === 'scrap'
+        ? 'scrap'
+        : match?.status === 'matched' ? 'pre_order' : 'regular';
       sqlite.prepare('UPDATE calls SET call_type = ?, updated_at = ? WHERE id = ?').run(
-        match?.status === 'matched' ? 'pre_order' : 'regular',
+        finalCallType,
         now,
         call.id
       );
@@ -1954,7 +1957,7 @@ async function claimAndProcessNextJob(): Promise<boolean> {
 
       if (attempts < maxAttempts) {
         // Exponential backoff
-        const backoffMs = attempts === 1 ? 30000 : 120000;
+        const backoffMs = attempts === 1 ? 15000 : attempts === 2 ? 60000 : 180000;
         const nextAvailableAt = new Date(Date.now() + backoffMs).toISOString().replace('T', ' ').slice(0, 19);
 
         sqlite
@@ -1972,6 +1975,9 @@ async function claimAndProcessNextJob(): Promise<boolean> {
             WHERE id = ?
           `)
           .run(errorMsg, now, claimedJobId);
+        if (currentJob?.job_type === 'transcribe') {
+          sqlite.prepare("UPDATE calls SET status = 'failed', updated_at = ? WHERE id = ?").run(now, currentJob.entity_id);
+        }
       }
     }
     return false;
@@ -2312,7 +2318,26 @@ async function startServer() {
     params.push(limit);
 
     const calls = sqlite.prepare(query).all(...params) as unknown as CallRecord[];
-    return res.json(calls);
+    const trades = sqlite.prepare('SELECT * FROM trades').all() as unknown as TradeRecord[];
+    const enrichedCalls = calls.map((call) => {
+      const callPhone = normalizePhoneNumber(call.calling_number || call.phone_number || call.client_number || call.registered_number);
+      const trade = trades.find((candidate) => {
+        const tradePhone = normalizePhoneNumber(candidate.client_number || candidate.phone_number);
+        return Boolean(callPhone && tradePhone && callPhone.slice(-10) === tradePhone.slice(-10));
+      });
+
+      if (!trade) return call;
+      return {
+        ...call,
+        caller_name: call.caller_name || trade.advisor_name || trade.dealer || '',
+        client: call.client || trade.client || '',
+        client_number: call.client_number || trade.client_number || trade.phone_number || '',
+        registered_number: call.registered_number || trade.client_number || trade.phone_number || '',
+        dealer: call.dealer || trade.dealer || '',
+        team: call.team || trade.team || '',
+      };
+    });
+    return res.json(enrichedCalls);
   });
 
   // Single Call Deletion
@@ -2493,15 +2518,22 @@ ${call.transcript || '(No speech transcript recorded)'}
   // Re-classify all calls according to pre_order / regular / scrap rules
   apiRouter.post('/calls/classify-all', requireAuth, (_req: Request, res: Response) => {
     try {
-      const calls = sqlite.prepare('SELECT id, duration_seconds, transcript FROM calls').all() as { id: number; duration_seconds?: number; transcript?: string }[];
+      const calls = sqlite.prepare('SELECT * FROM calls').all() as unknown as CallRecord[];
       let updatedCount = 0;
       const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
 
       sqlite.exec('BEGIN TRANSACTION;');
       for (const c of calls) {
         const classification = classifyCallIntent(c.transcript, c.duration_seconds);
+        const match = classification.call_type === 'scrap' ? null : runMatchingForCall(c.id);
+        const callType = classification.call_type === 'scrap'
+          ? 'scrap'
+          : match?.status === 'matched' ? 'pre_order' : 'regular';
+        const evidence = match?.status === 'matched'
+          ? 'Transcript contains the matched client code, stock, quantity, and price/CMP.'
+          : classification.evidence;
         sqlite.prepare('UPDATE calls SET call_type = ?, preorder_evidence = ?, updated_at = ? WHERE id = ?')
-          .run(classification.call_type, classification.evidence, now, c.id);
+          .run(callType, evidence, now, c.id);
         updatedCount++;
       }
       sqlite.exec('COMMIT;');

@@ -290,6 +290,7 @@ export function extractSpokenEvidence(
   // Look for quantity patterns (e.g. "100 shares", "50 qty", "100 quantity", "Buy 100 TCS")
   const qtyPatterns = [
     /\b(\d+(?:\.\d+)?)\s*(?:shares?|qty|quantity|lots?|nag|hisse)\b/i,
+    /\b(\d+(?:\.\d+)?)\s*(?:buys?|sells?|orders?)\b/i,
     /\b(?:shares?|qty|quantity|lots?|nag|hisse)\s*(?:of\s*)?(\d+(?:\.\d+)?)\b/i,
     /\b(?:buy|buying|sell|selling|purchase|purchasing|order(?:\s+for)?|kharid|kharido|bech|becho|placed|placing)\s+(\d+(?:\.\d+)?)\s+(?:shares?\s+of\s+)?([A-Za-z0-9&]+)\b/i,
   ];
