@@ -10,28 +10,34 @@ import {
   Loader2,
   Database,
   Globe,
+  Download,
+  FileSpreadsheet,
+  FileText,
+  HelpCircle,
 } from 'lucide-react';
-import { api } from '../lib/api';
+import * as XLSX from 'xlsx';
+import { api, getStoredToken } from '../lib/api';
 
 interface ChatMessage {
   id: string;
   sender: 'user' | 'assistant';
   text: string;
   timestamp: string;
+  isReport?: boolean;
 }
 
 const INTERNAL_SUGGESTIONS = [
   'How many calls are audited so far?',
   'Which advisors have fatal violations?',
-  'Show Q1 (CLI phone match) pass vs fail count',
-  'Summary of recent audited pre-order calls',
+  'Download scorecards report',
+  'Check system pipeline issues',
 ];
 
 const GENERAL_SUGGESTIONS = [
-  'Explain SEBI pre-order voice recording rules',
+  'SEBI pre-order voice recording rules',
   'What is the difference between limit order and market order?',
-  'How does STT work in Indian equity trades?',
-  'What are the key compliance duties for a stock broker in India?',
+  'Explain STT on Indian equity trades',
+  'Key compliance duties for stock brokers in India',
 ];
 
 export const ComplianceChatbot: React.FC = () => {
@@ -41,12 +47,13 @@ export const ComplianceChatbot: React.FC = () => {
     {
       id: 'welcome',
       sender: 'assistant',
-      text: 'Hello! I am your **ADAM-AR AI Intelligence Assistant**.\n\nChoose **ADAM-AR Data Mode** to query call recordings, Q1-Q5 scorecards, and trade reconciliations, or switch to **General & Internet Mode** to ask any question from the web or financial markets.',
+      text: 'Hello! I am your **ADAM-AR AI Intelligence Assistant**.\n\nChoose **ADAM-AR Data Mode** to ask anything about your web app, call records, scorecards, issues, or request reports in downloadable format.\n\nChoose **Google & Web AI Mode** for general web search and any market or knowledge questions.',
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
     },
   ]);
   const [inputText, setInputText] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [isDownloading, setIsDownloading] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const scrollToBottom = () => {
@@ -58,6 +65,62 @@ export const ComplianceChatbot: React.FC = () => {
       scrollToBottom();
     }
   }, [messages, isOpen]);
+
+  const handleDownloadDirectReport = async (reportType: 'csv' | 'excel' | 'fatal') => {
+    setIsDownloading(true);
+    try {
+      const token = getStoredToken();
+      const res = await fetch(`/api/reports/export?token=${token || ''}`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+
+      if (!res.ok) {
+        throw new Error('Could not fetch report data from server.');
+      }
+
+      if (reportType === 'csv') {
+        const blob = await res.blob();
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `ADAM_AR_Compliance_Scorecards_${new Date().toISOString().slice(0, 10)}.csv`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+      } else if (reportType === 'excel') {
+        const csvText = await res.text();
+        const rows = csvText.split('\n').map((r) => r.split(',').map((c) => c.replace(/^"|"$/g, '').trim()));
+        const ws = XLSX.utils.aoa_to_sheet(rows);
+        const wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, ws, 'Audit_Scorecards');
+        XLSX.writeFile(wb, `ADAM_AR_Audit_Master_${new Date().toISOString().slice(0, 10)}.xlsx`);
+      }
+
+      // Add confirmation in chat
+      const confirmMsg: ChatMessage = {
+        id: `assistant-dl-${Date.now()}`,
+        sender: 'assistant',
+        text: `✅ **Download initiated:** Your requested ${reportType.toUpperCase()} report has been generated and saved to your device.`,
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      };
+      setMessages((prev) => [...prev, confirmMsg]);
+    } catch (err: unknown) {
+      alert(`Report download failed: ${(err as Error).message}`);
+    } finally {
+      setIsDownloading(false);
+    }
+  };
+
+  const handleDownloadTextAsFile = (content: string, filename: string) => {
+    const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  };
 
   const handleSend = async (queryText?: string) => {
     const textToSend = (queryText || inputText).trim();
@@ -74,6 +137,9 @@ export const ComplianceChatbot: React.FC = () => {
     setInputText('');
     setIsLoading(true);
 
+    const isReportQuery =
+      /report|download|export|csv|excel|spreadsheet|scorecard list/i.test(textToSend);
+
     try {
       const response = await api.sendChatMessage(textToSend, mode);
       const assistantMessage: ChatMessage = {
@@ -81,6 +147,7 @@ export const ComplianceChatbot: React.FC = () => {
         sender: 'assistant',
         text: response.answer || 'I could not retrieve an answer at this moment.',
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        isReport: isReportQuery,
       };
       setMessages((prev) => [...prev, assistantMessage]);
     } catch (err: unknown) {
@@ -101,9 +168,10 @@ export const ComplianceChatbot: React.FC = () => {
       {
         id: 'welcome',
         sender: 'assistant',
-        text: mode === 'internal'
-          ? 'Conversation reset. Ask any question about ADAM-AR call recordings, trade matching, or audit scorecards.'
-          : 'Conversation reset. Ask any question from the internet, markets, regulations, or general knowledge.',
+        text:
+          mode === 'internal'
+            ? 'Conversation reset. Ask any question about ADAM-AR call recordings, trade matching, audit scorecards, or request reports in downloadable format.'
+            : 'Conversation reset. Ask any question from the web, financial markets, SEBI regulations, or general knowledge.',
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       },
     ]);
@@ -115,7 +183,7 @@ export const ComplianceChatbot: React.FC = () => {
     <aside aria-label="ADAM-AR Compliance Assistant" className="fixed bottom-5 right-5 z-50 flex flex-col items-end">
       {/* Expanded Chat Window */}
       {isOpen && (
-        <div className="w-[380px] sm:w-[440px] h-[560px] max-h-[85vh] bg-white rounded-2xl shadow-2xl border border-neutral-200 flex flex-col overflow-hidden mb-3 animate-in fade-in slide-in-from-bottom-5 duration-200">
+        <div className="w-[380px] sm:w-[460px] h-[600px] max-h-[85vh] bg-white rounded-2xl shadow-2xl border border-neutral-200 flex flex-col overflow-hidden mb-3 animate-in fade-in slide-in-from-bottom-5 duration-200">
           {/* Header */}
           <div className="bg-neutral-950 text-white px-4 py-3 flex flex-col gap-2.5 border-b border-neutral-800">
             <div className="flex items-center justify-between">
@@ -129,7 +197,7 @@ export const ComplianceChatbot: React.FC = () => {
                     <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
                   </div>
                   <p className="text-[10px] text-neutral-400">
-                    {mode === 'internal' ? 'Internal ADAM-AR Data Connected' : 'General & Internet Knowledge Active'}
+                    {mode === 'internal' ? 'Mode 1: App & Compliance Data (Reports & Issues)' : 'Mode 2: Google & Web AI Intelligence'}
                   </p>
                 </div>
               </div>
@@ -164,7 +232,7 @@ export const ComplianceChatbot: React.FC = () => {
                 }`}
               >
                 <Database className="w-3.5 h-3.5" />
-                <span className="text-[11px]">ADAM-AR Data</span>
+                <span className="text-[11px]">1: App &amp; Reports</span>
               </button>
               <button
                 type="button"
@@ -176,9 +244,32 @@ export const ComplianceChatbot: React.FC = () => {
                 }`}
               >
                 <Globe className="w-3.5 h-3.5" />
-                <span className="text-[11px]">General / Web AI</span>
+                <span className="text-[11px]">2: Google &amp; Web</span>
               </button>
             </div>
+
+            {/* Quick Report Download Bar (in Mode 1) */}
+            {mode === 'internal' && (
+              <div className="flex items-center gap-1.5 pt-1 overflow-x-auto text-[10px]">
+                <span className="text-neutral-400 shrink-0 font-medium">Quick Export:</span>
+                <button
+                  onClick={() => handleDownloadDirectReport('csv')}
+                  disabled={isDownloading}
+                  className="px-2 py-0.5 bg-neutral-800 hover:bg-neutral-700 text-amber-300 rounded border border-neutral-700 flex items-center gap-1 shrink-0 cursor-pointer"
+                >
+                  <Download className="w-2.5 h-2.5" />
+                  <span>Scorecards (.CSV)</span>
+                </button>
+                <button
+                  onClick={() => handleDownloadDirectReport('excel')}
+                  disabled={isDownloading}
+                  className="px-2 py-0.5 bg-neutral-800 hover:bg-neutral-700 text-emerald-300 rounded border border-neutral-700 flex items-center gap-1 shrink-0 cursor-pointer"
+                >
+                  <FileSpreadsheet className="w-2.5 h-2.5" />
+                  <span>Master (.XLSX)</span>
+                </button>
+              </div>
+            )}
           </div>
 
           {/* Message List */}
@@ -189,7 +280,7 @@ export const ComplianceChatbot: React.FC = () => {
                 className={`flex gap-2.5 text-xs ${msg.sender === 'user' ? 'justify-end' : 'justify-start'}`}
               >
                 {msg.sender === 'assistant' && (
-                  <div className="w-6 h-6 rounded-full bg-amber-400 text-black flex items-center justify-center shrink-0 mt-0.5">
+                  <div className="w-6 h-6 rounded-full bg-amber-400 text-black flex items-center justify-center shrink-0 mt-0.5 font-bold">
                     <Bot className="w-3.5 h-3.5" />
                   </div>
                 )}
@@ -207,7 +298,11 @@ export const ComplianceChatbot: React.FC = () => {
                         <div key={idx} className={line.startsWith('- ') ? 'ml-2 my-0.5' : 'my-0.5'}>
                           {parts.map((p, i) => {
                             if (p.startsWith('**') && p.endsWith('**')) {
-                              return <strong key={i} className="font-semibold text-neutral-950">{p.slice(2, -2)}</strong>;
+                              return (
+                                <strong key={i} className="font-semibold text-neutral-950">
+                                  {p.slice(2, -2)}
+                                </strong>
+                              );
                             }
                             return p;
                           })}
@@ -215,6 +310,27 @@ export const ComplianceChatbot: React.FC = () => {
                       );
                     })}
                   </div>
+
+                  {/* If assistant response contains report or tables, provide download actions */}
+                  {msg.sender === 'assistant' && (msg.isReport || msg.text.includes('|') || msg.text.length > 300) && (
+                    <div className="mt-2.5 pt-2 border-t border-neutral-100 flex flex-wrap items-center gap-1.5">
+                      <button
+                        onClick={() => handleDownloadTextAsFile(msg.text, `ADAM_AR_Report_${Date.now()}.txt`)}
+                        className="px-2 py-1 bg-neutral-100 hover:bg-neutral-200 text-neutral-700 rounded text-[10px] font-semibold flex items-center gap-1 cursor-pointer transition-colors"
+                      >
+                        <FileText className="w-3 h-3 text-neutral-500" />
+                        <span>Download Text</span>
+                      </button>
+                      <button
+                        onClick={() => handleDownloadDirectReport('csv')}
+                        className="px-2 py-1 bg-amber-100 hover:bg-amber-200 text-amber-900 rounded text-[10px] font-semibold flex items-center gap-1 cursor-pointer transition-colors"
+                      >
+                        <Download className="w-3 h-3 text-amber-700" />
+                        <span>Download CSV Data</span>
+                      </button>
+                    </div>
+                  )}
+
                   <div
                     className={`text-[9px] mt-1 text-right ${
                       msg.sender === 'user' ? 'text-neutral-400' : 'text-neutral-400'
@@ -239,7 +355,7 @@ export const ComplianceChatbot: React.FC = () => {
                 <div className="bg-white border border-neutral-200 rounded-2xl px-3.5 py-2 rounded-bl-none flex items-center gap-2 text-neutral-500 shadow-xs">
                   <Loader2 className="w-3.5 h-3.5 animate-spin text-amber-500" />
                   <span className="text-[11px]">
-                    {mode === 'internal' ? 'Scanning ADAM-AR database...' : 'Generating answer from AI & web...'}
+                    {mode === 'internal' ? 'Scanning ADAM-AR database & reports...' : 'Searching Google knowledge & AI...'}
                   </span>
                 </div>
               </div>
@@ -277,8 +393,8 @@ export const ComplianceChatbot: React.FC = () => {
               onChange={(e) => setInputText(e.target.value)}
               placeholder={
                 mode === 'internal'
-                  ? 'Ask about calls, trades, scorecards in ADAM-AR...'
-                  : 'Ask any random or web question...'
+                  ? 'Ask about web, issues, calls, or ask for downloadable report...'
+                  : 'Search Google / Ask any general question...'
               }
               disabled={isLoading}
               className="flex-1 px-3 py-2 bg-neutral-100 border border-neutral-200 focus:bg-white focus:border-amber-400 rounded-xl text-xs text-neutral-900 focus:outline-hidden transition-all"

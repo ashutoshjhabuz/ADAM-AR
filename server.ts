@@ -30,7 +30,7 @@ import {
   scoreTradeCandidates,
   evaluateMatchingDecision,
 } from './server/matcher';
-import { classifyCallIntent, hasCompletePreOrderEvidence } from './server/classifier';
+import { classifyCallIntent } from './server/classifier';
 import { evaluateDeterministicQ1 } from './server/q1-evaluator';
 import { evaluateDeterministicQ3 } from './server/q3-evaluator';
 import { transcribeWithMultiPassEnsemble } from './server/ensemble-transcriber';
@@ -463,6 +463,19 @@ sqlite.exec(`
     scored_count INTEGER DEFAULT 0,
     bundle_hash TEXT
   );
+
+  CREATE TABLE IF NOT EXISTS cleared_backups (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    cleared_at TEXT NOT NULL,
+    cleared_by TEXT NOT NULL,
+    total_calls INTEGER DEFAULT 0,
+    total_trades INTEGER DEFAULT 0,
+    total_audits INTEGER DEFAULT 0,
+    total_scorecards INTEGER DEFAULT 0,
+    backup_file_path TEXT NOT NULL,
+    file_size_bytes INTEGER DEFAULT 0,
+    notes TEXT
+  );
 `);
 
 // Create Performance & Idempotency Indexes
@@ -476,6 +489,7 @@ try {
   sqlite.exec('CREATE INDEX IF NOT EXISTS idx_audits_call ON audits(call_id);');
   sqlite.exec('CREATE INDEX IF NOT EXISTS idx_scorecards_call ON scorecards(call_id);');
   sqlite.exec('CREATE INDEX IF NOT EXISTS idx_users_token ON users(token);');
+  sqlite.exec('CREATE INDEX IF NOT EXISTS idx_cleared_backups_cleared_at ON cleared_backups(cleared_at);');
 } catch {}
 
 // Safely ensure updated_at and client_code columns exist on scorecards
@@ -544,20 +558,29 @@ function initAdminUser() {
   ];
 
   const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
+  const farFuture = new Date(Date.now() + 86400000 * 365).toISOString();
 
   for (const u of usersToEnsure) {
-    const existing = sqlite.prepare('SELECT id FROM users WHERE LOWER(username) = LOWER(?)').get(u.username) as { id: number } | undefined;
+    const existing = sqlite.prepare('SELECT id, token, token_expires_at FROM users WHERE LOWER(username) = LOWER(?)').get(u.username) as { id: number; token?: string; token_expires_at?: string } | undefined;
     const salt = crypto.randomBytes(16).toString('hex');
     const hash = hashPassword(u.password, salt);
 
     if (existing) {
-      sqlite
-        .prepare('UPDATE users SET email = ?, password_hash = ?, salt = ?, full_name = ?, role = ? WHERE id = ?')
-        .run(u.email, hash, salt, u.full_name, u.role, existing.id);
+      if (!existing.token || (existing.token_expires_at && existing.token_expires_at < new Date().toISOString())) {
+        const seededToken = crypto.randomBytes(32).toString('hex');
+        sqlite
+          .prepare('UPDATE users SET email = ?, password_hash = ?, salt = ?, full_name = ?, role = ?, token = ?, token_expires_at = ? WHERE id = ?')
+          .run(u.email, hash, salt, u.full_name, u.role, seededToken, farFuture, existing.id);
+      } else {
+        sqlite
+          .prepare('UPDATE users SET email = ?, password_hash = ?, salt = ?, full_name = ?, role = ? WHERE id = ?')
+          .run(u.email, hash, salt, u.full_name, u.role, existing.id);
+      }
     } else {
+      const seededToken = crypto.randomBytes(32).toString('hex');
       sqlite
-        .prepare('INSERT INTO users (username, email, full_name, password_hash, salt, role, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
-        .run(u.username, u.email, u.full_name, hash, salt, u.role, now);
+        .prepare('INSERT INTO users (username, email, full_name, password_hash, salt, role, token, token_expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(u.username, u.email, u.full_name, hash, salt, u.role, seededToken, farFuture, now);
       addLog('info', 'AUTH_INIT', `Enterprise user account provisioned (${u.username}).`);
     }
   }
@@ -738,7 +761,7 @@ function setSettingValue(key: string, value: string) {
 }
 
 const DEFAULT_GROQ_KEY = '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';
-const DEFAULT_GEMINI_KEY = 'AQ.Ab8RN6KqDuPC4pu9k4aHTM91bEwILn2vi0N7-UIryVmiFaQ4dQ';
+const DEFAULT_GEMINI_KEY = 'AQ.Ab8RN6K2prj4YfMqLl7dSOZazgI8qnEF8XQUmHNt3fy7IyeBdw';
 
 function getGroqKey(): string {
   const fromDb = getSettingValue('groq_key');
@@ -1292,7 +1315,7 @@ async function transcribeWithGroq(filePath: string, filename: string): Promise<{
     throw new Error(`Audio recording file not found on disk at "${filePath}".`);
   }
 
-  const asrRes = await transcribeAudioFile(filePath, getGroqKey(), getGeminiKey());
+  const asrRes = await transcribeAudioFile(filePath, getGroqKey(), process.env.GEMINI_API_KEY);
   return {
     transcript: asrRes.transcript,
     model: asrRes.modelUsed,
@@ -1543,9 +1566,6 @@ function resolveAuthoritativeContextForCall(callId: number): {
     const allTrades = sqlite.prepare('SELECT * FROM trades').all() as unknown as TradeRecord[];
     const candidates = scoreTradeCandidates(call, allTrades);
     const decision = evaluateMatchingDecision(candidates);
-    // A best candidate is useful audit context even when the correlation is
-    // ambiguous. It is never treated as a confirmed match unless the matcher
-    // explicitly returns `matched`.
     resolvedTrade = decision.bestTrade;
   }
 
@@ -1596,23 +1616,18 @@ function calculateScoreAndPersistScorecard(
 function runMatchingForCall(callId: number): MatchRecord | null {
   const call = sqlite.prepare('SELECT * FROM calls WHERE id = ?').get(callId) as unknown as CallRecord | undefined;
   if (!call) return null;
-  if (call.call_type !== 'pre_order') return null;
 
   const trades = sqlite.prepare('SELECT * FROM trades').all() as unknown as TradeRecord[];
   if (trades.length === 0) return null;
 
-  // Non-order conversations must never create a match or enter the audit queue.
   const candidates = scoreTradeCandidates(call, trades);
   const decision = evaluateMatchingDecision(candidates);
 
-  if (!decision.bestTrade || decision.matchStatus !== 'matched') {
-    sqlite.prepare('DELETE FROM matches WHERE call_id = ?').run(call.id);
+  if (!decision.bestTrade || decision.matchStatus === 'unmatched') {
     return null;
   }
 
   const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
-
-  sqlite.prepare("UPDATE calls SET call_type = 'pre_order', updated_at = ? WHERE id = ?").run(now, call.id);
 
   // Persist or Update Match Record
   const existing = sqlite
@@ -1692,30 +1707,11 @@ function runMatchingForCall(callId: number): MatchRecord | null {
   return sqlite.prepare('SELECT * FROM matches WHERE id = ?').get(matchId) as unknown as MatchRecord;
 }
 
-/** Remove records created by the previous broad audit queue rules. */
-function pruneNonEligibleComplianceRecords(): void {
-  const staleCalls = sqlite.prepare(`
-    SELECT c.id
-    FROM calls c
-    WHERE EXISTS (SELECT 1 FROM audits a WHERE a.call_id = c.id)
-      AND NOT EXISTS (
-        SELECT 1 FROM matches m
-        WHERE m.call_id = c.id AND m.status = 'matched'
-      )
-  `).all() as Array<{ id: number }>;
-
-  for (const { id } of staleCalls) {
-    sqlite.prepare('DELETE FROM scorecards WHERE call_id = ?').run(id);
-    sqlite.prepare('DELETE FROM audits WHERE call_id = ?').run(id);
-    sqlite.prepare('DELETE FROM matches WHERE call_id = ?').run(id);
-  }
-}
-
 // -------------------------------------------------------------
 // Real Persistent Queue Worker Engine with Multi-Job Concurrency
 // -------------------------------------------------------------
 let activeWorkerCount = 0;
-const MAX_CONCURRENT_WORKERS = Number(process.env.AUDITEQ_WORKERS || 6);
+const MAX_CONCURRENT_WORKERS = 3;
 
 async function claimAndProcessNextJob(): Promise<boolean> {
   if (activeWorkerCount >= MAX_CONCURRENT_WORKERS) return false;
@@ -1752,7 +1748,7 @@ async function claimAndProcessNextJob(): Promise<boolean> {
     currentJob = job;
     claimedJobId = job.id;
     const workerId = `worker_${process.pid}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-      const leaseUntil = new Date(Date.now() + 600000).toISOString().replace('T', ' ').slice(0, 19); // 10 min lease
+    const leaseUntil = new Date(Date.now() + 180000).toISOString().replace('T', ' ').slice(0, 19); // 3 min lease
 
     const updateRes = sqlite
       .prepare(`
@@ -1788,7 +1784,7 @@ async function claimAndProcessNextJob(): Promise<boolean> {
         const asrRes = await transcribeAudioFile(
           call.storage_path || '',
           getGroqKey(),
-          getGeminiKey(),
+          process.env.GEMINI_API_KEY,
           matchedTrade
         );
         transcript = asrRes.transcript;
@@ -1798,15 +1794,15 @@ async function claimAndProcessNextJob(): Promise<boolean> {
         addLog('info', 'ASR_COMPLETE', `ASR complete for Call #${call.id} using ${model}. Duration: ${detectedDuration}s.`);
       } catch (asrErr: unknown) {
         addLog('warning', 'ASR_FALLBACK', `Primary ASR encountered notice: ${(asrErr as Error).message}. Attempting fallback.`);
-        // transcribeAudioFile already performs its configured fallback and
-        // secondary verification. Retrying the same pipeline here doubles
-        // latency and can create duplicate rate-limit failures.
-        throw asrErr;
+        const fallbackRes = await transcribeWithGroq(call.storage_path || '', call.recording_name);
+        transcript = fallbackRes.transcript;
+        rawTranscript = fallbackRes.transcript;
+        model = fallbackRes.model;
       }
 
       // Intent & Category Classification Step (pre_order vs regular vs scrap)
       const callDuration = call.duration_seconds || detectedDuration;
-      const classification = classifyCallIntent(transcript, callDuration, allTrades);
+      const classification = classifyCallIntent(transcript, callDuration);
 
       sqlite
         .prepare(`
@@ -1832,19 +1828,11 @@ async function claimAndProcessNextJob(): Promise<boolean> {
       addLog('info', 'WORKER_TRANSCRIBE_COMPLETE', `Transcription and classification finished for Call #${call.id} (${classification.call_type}).`);
 
       // Only pre_order calls enter trade matching & compliance audit workflow
-      const match = classification.call_type === 'scrap' ? null : runMatchingForCall(call.id);
-      const finalCallType = classification.call_type === 'scrap'
-        ? 'scrap'
-        : hasCompletePreOrderEvidence(transcript, allTrades) || match?.status === 'matched' ? 'pre_order' : classification.call_type;
-      sqlite.prepare('UPDATE calls SET call_type = ?, updated_at = ? WHERE id = ?').run(
-        finalCallType,
-        now,
-        call.id
-      );
-      if (finalCallType === 'pre_order') {
+      if (classification.call_type === 'pre_order') {
+        runMatchingForCall(call.id);
         enqueueJob('audit', call.id, `call:${call.id}:audit`);
       } else {
-        addLog('info', 'CALL_FILTERED', `Call #${call.id} classified as "${finalCallType}". Bypassing trade compliance audit.`);
+        addLog('info', 'CALL_FILTERED', `Call #${call.id} classified as "${classification.call_type}". Bypassing trade compliance audit.`);
       }
 
     } else if (job.job_type === 'audit') {
@@ -1950,7 +1938,7 @@ async function claimAndProcessNextJob(): Promise<boolean> {
 
       if (attempts < maxAttempts) {
         // Exponential backoff
-        const backoffMs = attempts === 1 ? 15000 : attempts === 2 ? 60000 : 180000;
+        const backoffMs = attempts === 1 ? 30000 : 120000;
         const nextAvailableAt = new Date(Date.now() + backoffMs).toISOString().replace('T', ' ').slice(0, 19);
 
         sqlite
@@ -1968,9 +1956,6 @@ async function claimAndProcessNextJob(): Promise<boolean> {
             WHERE id = ?
           `)
           .run(errorMsg, now, claimedJobId);
-        if (currentJob?.job_type === 'transcribe') {
-          sqlite.prepare("UPDATE calls SET status = 'failed', updated_at = ? WHERE id = ?").run(now, currentJob.entity_id);
-        }
       }
     }
     return false;
@@ -1982,9 +1967,9 @@ async function claimAndProcessNextJob(): Promise<boolean> {
 // Background Worker Loop (1-second heartbeat) with parallel worker dispatch
 setInterval(async () => {
   try {
-    const availableSlots = Math.max(0, MAX_CONCURRENT_WORKERS - activeWorkerCount);
-    for (let slot = 0; slot < availableSlots; slot++) {
-      void claimAndProcessNextJob();
+    while (activeWorkerCount < MAX_CONCURRENT_WORKERS) {
+      const dispatched = await claimAndProcessNextJob();
+      if (!dispatched) break;
     }
   } catch (err) {
     console.error('Worker loop heartbeat error:', err);
@@ -2311,26 +2296,7 @@ async function startServer() {
     params.push(limit);
 
     const calls = sqlite.prepare(query).all(...params) as unknown as CallRecord[];
-    const trades = sqlite.prepare('SELECT * FROM trades').all() as unknown as TradeRecord[];
-    const enrichedCalls = calls.map((call) => {
-      const callPhone = normalizePhoneNumber(call.calling_number || call.phone_number || call.client_number || call.registered_number);
-      const trade = trades.find((candidate) => {
-        const tradePhone = normalizePhoneNumber(candidate.client_number || candidate.phone_number);
-        return Boolean(callPhone && tradePhone && callPhone.slice(-10) === tradePhone.slice(-10));
-      });
-
-      if (!trade) return call;
-      return {
-        ...call,
-        caller_name: call.caller_name || trade.advisor_name || trade.dealer || '',
-        client: call.client || trade.client || '',
-        client_number: call.client_number || trade.client_number || trade.phone_number || '',
-        registered_number: call.registered_number || trade.client_number || trade.phone_number || '',
-        dealer: call.dealer || trade.dealer || '',
-        team: call.team || trade.team || '',
-      };
-    });
-    return res.json(enrichedCalls);
+    return res.json(calls);
   });
 
   // Single Call Deletion
@@ -2511,23 +2477,15 @@ ${call.transcript || '(No speech transcript recorded)'}
   // Re-classify all calls according to pre_order / regular / scrap rules
   apiRouter.post('/calls/classify-all', requireAuth, (_req: Request, res: Response) => {
     try {
-      const calls = sqlite.prepare('SELECT * FROM calls').all() as unknown as CallRecord[];
-      const trades = sqlite.prepare('SELECT * FROM trades').all() as unknown as TradeRecord[];
+      const calls = sqlite.prepare('SELECT id, duration_seconds, transcript FROM calls').all() as { id: number; duration_seconds?: number; transcript?: string }[];
       let updatedCount = 0;
       const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
 
       sqlite.exec('BEGIN TRANSACTION;');
       for (const c of calls) {
-        const classification = classifyCallIntent(c.transcript, c.duration_seconds, trades);
-        const match = classification.call_type === 'scrap' ? null : runMatchingForCall(c.id);
-        const callType = classification.call_type === 'scrap'
-          ? 'scrap'
-          : hasCompletePreOrderEvidence(c.transcript, trades) || match?.status === 'matched' ? 'pre_order' : classification.call_type;
-        const evidence = match?.status === 'matched'
-          ? 'Transcript contains the matched client code, stock, quantity, and price/CMP.'
-          : classification.evidence;
+        const classification = classifyCallIntent(c.transcript, c.duration_seconds);
         sqlite.prepare('UPDATE calls SET call_type = ?, preorder_evidence = ?, updated_at = ? WHERE id = ?')
-          .run(callType, evidence, now, c.id);
+          .run(classification.call_type, classification.evidence, now, c.id);
         updatedCount++;
       }
       sqlite.exec('COMMIT;');
@@ -2900,7 +2858,7 @@ ${call.transcript || '(No speech transcript recorded)'}
             call.storage_path || '',
             call.recording_name,
             getGroqKey(),
-            getGeminiKey(),
+            process.env.GEMINI_API_KEY,
             matchedTrade,
             call.client
           );
@@ -2911,8 +2869,7 @@ ${call.transcript || '(No speech transcript recorded)'}
           transcript = fallbackRes.transcript;
           model = fallbackRes.model;
         }
-        const allTrades = sqlite.prepare('SELECT * FROM trades').all() as unknown as TradeRecord[];
-        const classification = classifyCallIntent(transcript, call.duration_seconds, allTrades);
+        const classification = classifyCallIntent(transcript, call.duration_seconds);
         sqlite
           .prepare("UPDATE calls SET transcript = ?, transcript_model = ?, call_type = ?, preorder_evidence = ?, status = 'transcribed' WHERE id = ?")
           .run(transcript, model, classification.call_type, classification.evidence, call.id);
@@ -2922,10 +2879,6 @@ ${call.transcript || '(No speech transcript recorded)'}
 
       runMatchingForCall(call.id);
       const { resolvedTrade, clientCode } = resolveAuthoritativeContextForCall(call.id);
-
-      if (!resolvedTrade) {
-        return res.status(400).json({ ok: false, error: 'Only confirmed pre-order calls with a strict trade match can be audited.' });
-      }
       const auditResult = await auditWithGroq(call, resolvedTrade, clientCode);
       const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
 
@@ -3017,14 +2970,11 @@ ${call.transcript || '(No speech transcript recorded)'}
       for (const c of calls) {
         const m = runMatchingForCall(c.id);
         if (m) matchesTriggered++;
-        const updatedCall = sqlite.prepare('SELECT call_type FROM calls WHERE id = ?').get(c.id) as { call_type?: string } | undefined;
-        if (updatedCall?.call_type === 'pre_order') {
+        if (c.transcript && c.transcript.trim()) {
           enqueueJob('audit', c.id, `call:${c.id}:audit`);
           auditsTriggered++;
         }
       }
-
-      pruneNonEligibleComplianceRecords();
 
       return res.json({
         ok: true,
@@ -3132,8 +3082,6 @@ ${call.transcript || '(No speech transcript recorded)'}
       const match = runMatchingForCall(c.id);
       if (match) matchedCount++;
     }
-
-    pruneNonEligibleComplianceRecords();
 
     addLog('info', 'MATCHING_EXECUTED', `Deterministic matching engine executed across ${calls.length} calls. ${matchedCount} match(es) correlated.`);
     return res.json({
@@ -3277,7 +3225,7 @@ ${call.transcript || '(No speech transcript recorded)'}
   });
 
   apiRouter.post('/audits/run-all', requireAuth, async (_req: Request, res: Response) => {
-    const calls = sqlite.prepare("SELECT * FROM calls WHERE transcript IS NOT NULL AND transcript != '' AND call_type = 'pre_order'").all() as unknown as CallRecord[];
+    const calls = sqlite.prepare('SELECT * FROM calls WHERE transcript IS NOT NULL AND transcript != ""').all() as unknown as CallRecord[];
     let auditedCount = 0;
     const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
 
@@ -3291,6 +3239,7 @@ ${call.transcript || '(No speech transcript recorded)'}
 
         runMatchingForCall(call.id);
         const { resolvedTrade, clientCode } = resolveAuthoritativeContextForCall(call.id);
+
         const auditResult = await auditWithGroq(call, resolvedTrade, clientCode);
         let auditId = audit?.id;
 
@@ -4326,6 +4275,26 @@ ${call.transcript || '(No speech transcript recorded)'}
     });
   });
 
+  apiRouter.put('/admin/users/:id/password', requireAuth, (req: Request, res: Response) => {
+    const userId = parseInt(req.params.id, 10);
+    const { password } = req.body || {};
+    if (!password || typeof password !== 'string' || password.trim().length < 4) {
+      return res.status(400).json({ ok: false, error: 'Password must be at least 4 characters.' });
+    }
+
+    const user = sqlite.prepare('SELECT id, email, username FROM users WHERE id = ?').get(userId) as { id: number; email: string; username: string } | undefined;
+    if (!user) {
+      return res.status(404).json({ ok: false, error: 'User not found.' });
+    }
+
+    const salt = crypto.randomBytes(16).toString('hex');
+    const hash = hashPassword(password.trim(), salt);
+    sqlite.prepare('UPDATE users SET password_hash = ?, salt = ? WHERE id = ?').run(hash, salt, userId);
+
+    addLog('info', 'USER_PASSWORD_UPDATED', `Password updated for user account "${user.email || user.username}".`);
+    return res.json({ ok: true, message: `Password updated successfully for ${user.email || user.username}.` });
+  });
+
   apiRouter.delete('/admin/users/:id', requireAuth, (req: Request, res: Response) => {
     const userId = parseInt(req.params.id, 10);
     const user = sqlite.prepare('SELECT id, email, username FROM users WHERE id = ?').get(userId) as { id: number; email: string; username: string } | undefined;
@@ -4341,7 +4310,101 @@ ${call.transcript || '(No speech transcript recorded)'}
     return res.json({ ok: true, message: `User account "${user.email || user.username}" removed.` });
   });
 
-  apiRouter.post('/admin/clear-database', requireAuth, (_req: Request, res: Response) => {
+  apiRouter.get('/admin/cleared-backups', requireAuth, (_req: Request, res: Response) => {
+    try {
+      const backups = sqlite.prepare('SELECT * FROM cleared_backups ORDER BY id DESC LIMIT 50').all();
+      return res.json({ ok: true, backups });
+    } catch (err: unknown) {
+      return res.status(500).json({ ok: false, error: (err as Error).message });
+    }
+  });
+
+  apiRouter.get('/admin/cleared-backups/:id/download', requireAuth, (req: Request, res: Response) => {
+    try {
+      const backupId = parseInt(req.params.id, 10);
+      const backup = sqlite.prepare('SELECT * FROM cleared_backups WHERE id = ?').get(backupId) as any;
+      if (!backup || !backup.backup_file_path || !fs.existsSync(backup.backup_file_path)) {
+        return res.status(404).json({ ok: false, error: 'Backup archive file not found.' });
+      }
+
+      res.setHeader('Content-Disposition', `attachment; filename="auditeq_cleared_snapshot_${backup.id}_${backup.cleared_at.slice(0, 10)}.json"`);
+      res.setHeader('Content-Type', 'application/json');
+      return fs.createReadStream(backup.backup_file_path).pipe(res);
+    } catch (err: unknown) {
+      return res.status(500).json({ ok: false, error: (err as Error).message });
+    }
+  });
+
+  apiRouter.post('/admin/clear-database', requireAuth, (req: Request, res: Response) => {
+    const currentUser = (req as any).user;
+    const userEmail = currentUser?.email || currentUser?.username || 'admin@fundsindia.com';
+    const now = new Date().toISOString();
+
+    // 1. Gather snapshot of current records before deletion
+    const existingCalls = sqlite.prepare('SELECT * FROM calls').all();
+    const existingTrades = sqlite.prepare('SELECT * FROM trades').all();
+    const existingAudits = sqlite.prepare('SELECT * FROM audits').all();
+    const existingScorecards = sqlite.prepare('SELECT * FROM scorecards').all();
+    const existingMatches = sqlite.prepare('SELECT * FROM matches').all();
+    const existingLogs = sqlite.prepare('SELECT * FROM logs ORDER BY id DESC LIMIT 500').all();
+
+    const totalCalls = existingCalls.length;
+    const totalTrades = existingTrades.length;
+    const totalAudits = existingAudits.length;
+    const totalScorecards = existingScorecards.length;
+
+    // 2. Persist snapshot if any data existed
+    if (totalCalls > 0 || totalTrades > 0 || totalScorecards > 0 || totalAudits > 0) {
+      try {
+        const backupDir = path.join(process.cwd(), '.data', 'backups');
+        if (!fs.existsSync(backupDir)) fs.mkdirSync(backupDir, { recursive: true });
+
+        const filename = `cleared_backup_${Date.now()}_${totalCalls}calls_${totalTrades}trades.json`;
+        const filePath = path.join(backupDir, filename);
+
+        const snapshot = {
+          cleared_at: now,
+          cleared_by: userEmail,
+          counts: {
+            calls: totalCalls,
+            trades: totalTrades,
+            audits: totalAudits,
+            scorecards: totalScorecards,
+            matches: existingMatches.length,
+          },
+          data: {
+            calls: existingCalls,
+            trades: existingTrades,
+            matches: existingMatches,
+            audits: existingAudits,
+            scorecards: existingScorecards,
+            logs: existingLogs,
+          },
+        };
+
+        fs.writeFileSync(filePath, JSON.stringify(snapshot, null, 2), 'utf-8');
+        const stat = fs.statSync(filePath);
+
+        sqlite.prepare(`
+          INSERT INTO cleared_backups (cleared_at, cleared_by, total_calls, total_trades, total_audits, total_scorecards, backup_file_path, file_size_bytes, notes)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          now,
+          userEmail,
+          totalCalls,
+          totalTrades,
+          totalAudits,
+          totalScorecards,
+          filePath,
+          stat.size,
+          `Full snapshot archived before database clear by ${userEmail}`
+        );
+      } catch (backupErr) {
+        console.error('Snapshot archive error:', backupErr);
+      }
+    }
+
+    // 3. Purge tables
     sqlite.prepare('DELETE FROM jobs').run();
     sqlite.prepare('DELETE FROM matches').run();
     sqlite.prepare('DELETE FROM audits').run();
@@ -4363,10 +4426,16 @@ ${call.transcript || '(No speech transcript recorded)'}
       }
     } catch {}
 
-    addLog('warning', 'ADMIN_FULL_DATABASE_PURGE', 'All operational database tables and uploaded files cleared by administrator.');
+    addLog('warning', 'ADMIN_FULL_DATABASE_PURGE', `Operational database cleared by ${userEmail}. Snapshot archived.`);
     return res.json({
       ok: true,
-      message: 'All calls, trades, audits, scorecards, matches, logs, and pipeline jobs cleared in one click. Database is pristine.',
+      archived_snapshot: totalCalls > 0 || totalTrades > 0 || totalScorecards > 0,
+      cleared_counts: {
+        calls: totalCalls,
+        trades: totalTrades,
+        scorecards: totalScorecards,
+      },
+      message: `Database cleared. ${totalCalls} calls, ${totalTrades} trades, and ${totalScorecards} scorecards purged. Snapshot archived for future download.`,
     });
   });
 
@@ -4374,48 +4443,7 @@ ${call.transcript || '(No speech transcript recorded)'}
   // Pipeline Automation Trigger (Deduplicated Job Enqueueing)
   // -----------------------------------------------------------
   apiRouter.post('/pipeline/start', requireAuth, async (_req: Request, res: Response) => {
-    const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
-
-    // Recover jobs left behind by a crashed server, expired lease, or an
-    // exhausted ASR retry cycle before calculating the queue size.
-    sqlite.prepare(`
-      UPDATE jobs SET
-        status = 'queued', attempts = 0, available_at = NULL,
-        locked_at = NULL, locked_by = NULL, lease_until = NULL,
-        last_error = NULL, updated_at = ?
-      WHERE status = 'failed'
-        OR (status = 'processing' AND job_type = 'transcribe')
-    `).run(now);
-    sqlite.prepare(`
-      UPDATE calls SET status = 'imported', updated_at = ?
-      WHERE status = 'failed'
-        AND EXISTS (
-          SELECT 1 FROM jobs j
-          WHERE j.entity_id = calls.id AND j.job_type = 'transcribe' AND j.status = 'queued'
-        )
-    `).run(now);
-
-    // Repair categorization for transcripts produced before the current
-    // entity-based classifier. This makes Start / Refresh idempotent for an
-    // existing batch instead of only handling newly imported recordings.
-    const completedCalls = sqlite.prepare("SELECT * FROM calls WHERE transcript IS NOT NULL AND transcript != ''").all() as unknown as CallRecord[];
-    const trades = sqlite.prepare('SELECT * FROM trades').all() as unknown as TradeRecord[];
-    let reclassifiedCount = 0;
-    for (const call of completedCalls) {
-      const classification = classifyCallIntent(call.transcript, call.duration_seconds, trades);
-      const finalCallType = classification.call_type === 'scrap'
-        ? 'scrap'
-        : hasCompletePreOrderEvidence(call.transcript, trades) ? 'pre_order' : classification.call_type;
-      sqlite.prepare('UPDATE calls SET call_type = ?, preorder_confidence = ?, preorder_evidence = ?, updated_at = ? WHERE id = ?')
-        .run(finalCallType, classification.confidence, classification.evidence, now, call.id);
-      if (finalCallType === 'pre_order') {
-        runMatchingForCall(call.id);
-        enqueueJob('audit', call.id, `call:${call.id}:audit`);
-      }
-      reclassifiedCount++;
-    }
-
-    const unTranscribed = sqlite.prepare("SELECT id FROM calls WHERE status IN ('imported', 'failed')").all() as { id: number }[];
+    const unTranscribed = sqlite.prepare("SELECT id FROM calls WHERE status != 'transcribed'").all() as { id: number }[];
     let queuedCount = 0;
 
     for (const c of unTranscribed) {
@@ -4425,7 +4453,7 @@ ${call.transcript || '(No speech transcript recorded)'}
     }
 
     addLog('info', 'PIPELINE_STARTED', `Production pipeline triggered. ${queuedCount} transcription job(s) queued.`);
-    return res.json({ ok: true, message: `Pipeline started. Reclassified ${reclassifiedCount} transcript(s) and queued ${queuedCount} transcription job(s).` });
+    return res.json({ ok: true, message: `Pipeline started. ${queuedCount} job(s) queued for processing.` });
   });
 
   // -----------------------------------------------------------
@@ -4936,15 +4964,17 @@ If the user's question has NOTHING to do with ADAM-AR, calls, trades, audits, co
       if (geminiApiKey) {
         try {
           const ai = new GoogleGenAI({ apiKey: geminiApiKey });
+          const config = !isInternalMode ? { tools: [{ googleSearch: {} }] } : undefined;
           const response = await ai.models.generateContent({
             model: 'gemini-2.5-flash',
             contents: `${systemPrompt}\n\n${userMessageContent}`,
+            config,
           });
           if (response.text) {
             return res.json({ ok: true, answer: response.text, mode });
           }
-        } catch {
-          // fallback
+        } catch (geminiErr) {
+          console.error('Gemini chat error:', geminiErr);
         }
       }
 

@@ -22,7 +22,10 @@ import {
   Tag,
   AlertOctagon,
   FileCheck,
+  FileSpreadsheet,
 } from 'lucide-react';
+import * as XLSX from 'xlsx';
+import pptxgen from 'pptxgenjs';
 import type { ReportArchive } from '../types';
 import { getStoredToken } from '../lib/api';
 
@@ -145,6 +148,284 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ archives, isLoading })
     }
   };
 
+  const handleExportExcel = async () => {
+    setIsExporting(true);
+    try {
+      const wb = XLSX.utils.book_new();
+
+      // Sheet 1: Executive Summary
+      const summaryData = [
+        { Metric: 'Report Name', Value: 'FundsIndia Quality & Regulatory Compliance Audit' },
+        { Metric: 'Generation Date', Value: new Date().toLocaleString() },
+        { Metric: 'Audit Standard', Value: 'Pre-Order Confirmation Norms' },
+        { Metric: 'Total Audited Orders', Value: analytics?.totalScorecards || 0 },
+        { Metric: 'Overall Compliance Rate (%)', Value: `${analytics?.complianceRate || 0}%` },
+        { Metric: 'Compliant Calls (Pass)', Value: analytics?.compliantCount || 0 },
+        { Metric: 'Fatal Violations', Value: analytics?.fatalCount || 0 },
+        { Metric: 'Average Audit Score', Value: analytics?.avgScore || 0 },
+        { Metric: 'Pre-Order Identified Calls', Value: analytics?.callClassification?.preOrder || 0 },
+        { Metric: 'Regular Market Calls', Value: analytics?.callClassification?.regular || 0 },
+        { Metric: 'Scrap / Short Calls', Value: analytics?.callClassification?.scrap || 0 },
+      ];
+      const wsSummary = XLSX.utils.json_to_sheet(summaryData);
+      XLSX.utils.book_append_sheet(wb, wsSummary, 'Executive_Summary');
+
+      // Sheet 2: 5-Point Parameter Evaluation
+      if (analytics?.parameterFailures) {
+        const paramData = analytics.parameterFailures.map((p) => ({
+          Parameter_Code: p.parameter,
+          Question:
+            p.parameter === 'Q1'
+              ? 'Confirmation given in Registered / Authorised Number?'
+              : p.parameter === 'Q2'
+              ? 'Pre Order Confirmation is as per Regulatory Norms?'
+              : p.parameter === 'Q3'
+              ? 'Was not pre-order partial (Price / Qty confirmed)?'
+              : p.parameter === 'Q4'
+              ? 'Brokerage & Statutory Norms Disclosed'
+              : 'Was not any Return Commitment or Guarantee given?',
+          Severity: p.severity,
+          Total_Audits: p.total,
+          Failure_Count: p.fails,
+          Failure_Rate_Pct: `${p.failRate}%`,
+          Pass_Rate_Pct: `${100 - p.failRate}%`,
+        }));
+        const wsParams = XLSX.utils.json_to_sheet(paramData);
+        XLSX.utils.book_append_sheet(wb, wsParams, 'Parameter_Norms');
+      }
+
+      // Sheet 3: Advisor Performance Matrix
+      if (analytics?.advisors) {
+        const advData = analytics.advisors.map((adv) => ({
+          Advisor_Dealer_Name: adv.name,
+          Total_Audited_Calls: adv.totalCalls,
+          Average_Score: adv.avgScore,
+          Compliant_Calls: adv.passCount,
+          Fatal_Breaches: adv.fatalCount,
+          Compliance_Rate_Pct: `${adv.complianceRate}%`,
+          Risk_Category: adv.riskLevel,
+        }));
+        const wsAdv = XLSX.utils.json_to_sheet(advData);
+        XLSX.utils.book_append_sheet(wb, wsAdv, 'Dealer_Scorecard');
+      }
+
+      // Sheet 4: Call Classification & Durations
+      if (analytics?.callClassification) {
+        const c = analytics.callClassification;
+        const classData = [
+          {
+            Classification: 'Pre-Order Execution Call',
+            Description: 'Stock name, UCC client code, price and quantity discussed/executed',
+            Call_Count: c.preOrder,
+            Pct_Distribution: `${c.preOrderPct}%`,
+            Avg_Duration: formatSeconds(c.avgDurationPreOrder),
+          },
+          {
+            Classification: 'Regular Advisory Call',
+            Description: 'General market advisory, portfolio discussion, operations updates',
+            Call_Count: c.regular,
+            Pct_Distribution: `${c.regularPct}%`,
+            Avg_Duration: formatSeconds(c.avgDurationRegular),
+          },
+          {
+            Classification: 'Scrap / Unusable Call',
+            Description: 'Duration < 8s, rings, automated IVR prompts, dead air',
+            Call_Count: c.scrap,
+            Pct_Distribution: `${c.scrapPct}%`,
+            Avg_Duration: formatSeconds(c.avgDurationScrap),
+          },
+        ];
+        const wsClass = XLSX.utils.json_to_sheet(classData);
+        XLSX.utils.book_append_sheet(wb, wsClass, 'Call_Classification');
+      }
+
+      XLSX.writeFile(wb, `FundsIndia_Quality_Audit_Report_${new Date().toISOString().slice(0, 10)}.xlsx`);
+    } catch (err: unknown) {
+      alert(`Excel export failed: ${(err as Error).message}`);
+    } finally {
+      setIsExporting(false);
+    }
+  };
+
+  const handleExportPPT = async () => {
+    setIsExporting(true);
+    try {
+      const pres = new pptxgen();
+      pres.layout = 'LAYOUT_16x9';
+
+      // Slide 1: Cover Slide
+      const slide1 = pres.addSlide();
+      slide1.background = { color: '0A0A0E' };
+      slide1.addText('FundsIndia Voice Quality & Pre-Order Audit', {
+        x: 0.8,
+        y: 1.8,
+        w: 8.5,
+        fontSize: 28,
+        bold: true,
+        color: 'FBBF24',
+        fontFace: 'Arial',
+      });
+      slide1.addText('Executive Quality & Regulatory Compliance Presentation', {
+        x: 0.8,
+        y: 2.8,
+        w: 8.5,
+        fontSize: 16,
+        color: 'E5E5E5',
+        fontFace: 'Arial',
+      });
+      slide1.addText(`Generated on: ${new Date().toLocaleDateString()} | Engine: ADAM-AR v4.3 Pro`, {
+        x: 0.8,
+        y: 3.6,
+        w: 8.5,
+        fontSize: 12,
+        color: 'A3A3A3',
+        fontFace: 'Arial',
+      });
+
+      // Slide 2: High Level KPI Metrics
+      const slide2 = pres.addSlide();
+      slide2.background = { color: 'FFFFFF' };
+      slide2.addText('Executive Quality Summary', {
+        x: 0.8,
+        y: 0.6,
+        fontSize: 22,
+        bold: true,
+        color: '0A0A0E',
+      });
+      slide2.addText('Key compliance metrics audited against trade execution logs', {
+        x: 0.8,
+        y: 1.1,
+        fontSize: 12,
+        color: '737373',
+      });
+
+      const kpiBoxes = [
+        { title: 'Total Audited Orders', val: `${analytics?.totalScorecards || 0}`, sub: 'Calls cross-referenced' },
+        { title: 'Overall Compliance Rate', val: `${analytics?.complianceRate || 0}%`, sub: 'SEBI Norms Adherence' },
+        { title: 'Compliant Audits', val: `${analytics?.compliantCount || 0}`, sub: 'Zero Fatal Defects' },
+        { title: 'Fatal Breaches', val: `${analytics?.fatalCount || 0}`, sub: 'Q1, Q2, Q5 Fatalities' },
+      ];
+
+      kpiBoxes.forEach((box, i) => {
+        const xPos = 0.8 + i * 2.2;
+        slide2.addShape(pres.ShapeType.rect, {
+          x: xPos,
+          y: 1.8,
+          w: 2.0,
+          h: 2.0,
+          fill: { color: 'F8FAFC' },
+          line: { color: 'E2E8F0', width: 1 },
+        });
+        slide2.addText(box.title, { x: xPos + 0.1, y: 2.0, w: 1.8, fontSize: 10, bold: true, color: '64748B' });
+        slide2.addText(box.val, { x: xPos + 0.1, y: 2.5, w: 1.8, fontSize: 24, bold: true, color: '0F172A' });
+        slide2.addText(box.sub, { x: xPos + 0.1, y: 3.2, w: 1.8, fontSize: 9, color: '94A3B8' });
+      });
+
+      // Slide 3: 5-Point Parameter Compliance
+      const slide3 = pres.addSlide();
+      slide3.background = { color: 'FFFFFF' };
+      slide3.addText('5-Point Pre-Order Parameter Breakdown', {
+        x: 0.8,
+        y: 0.6,
+        fontSize: 22,
+        bold: true,
+        color: '0A0A0E',
+      });
+      slide3.addText('Fatal & non-fatal question evaluation performance', {
+        x: 0.8,
+        y: 1.1,
+        fontSize: 12,
+        color: '737373',
+      });
+
+      const qRows: any[][] = [
+        [
+          { text: 'Code', options: { bold: true, fill: { color: '0A0A0E' }, color: 'FFFFFF' } },
+          { text: 'Compliance Question', options: { bold: true, fill: { color: '0A0A0E' }, color: 'FFFFFF' } },
+          { text: 'Norm Type', options: { bold: true, fill: { color: '0A0A0E' }, color: 'FFFFFF' } },
+          { text: 'Fail Count', options: { bold: true, fill: { color: '0A0A0E' }, color: 'FFFFFF' } },
+          { text: 'Pass Rate (%)', options: { bold: true, fill: { color: '0A0A0E' }, color: 'FFFFFF' } },
+        ],
+      ];
+
+      (analytics?.parameterFailures || []).forEach((p) => {
+        qRows.push([
+          { text: p.parameter },
+          {
+            text:
+              p.parameter === 'Q1'
+                ? "Confirmation in Customer's Registered Number"
+                : p.parameter === 'Q2'
+                ? 'Pre-Order Confirmation as per Norms'
+                : p.parameter === 'Q3'
+                ? 'Pre-Order Partial (Price & Qty verification)'
+                : p.parameter === 'Q4'
+                ? 'Statutory Disclosures'
+                : 'Zero Return Commitment or Guarantee',
+          },
+          { text: p.severity },
+          { text: `${p.fails}` },
+          { text: `${100 - p.failRate}%` },
+        ]);
+      });
+
+      if (qRows.length > 1) {
+        slide3.addTable(qRows, {
+          x: 0.8,
+          y: 1.7,
+          w: 8.4,
+          fontSize: 10,
+          border: { pt: 0.5, color: 'E2E8F0' },
+        });
+      }
+
+      // Slide 4: Call Category Distribution
+      const slide4 = pres.addSlide();
+      slide4.background = { color: 'FFFFFF' };
+      slide4.addText('Call Categorization & Audio Efficiency', {
+        x: 0.8,
+        y: 0.6,
+        fontSize: 22,
+        bold: true,
+        color: '0A0A0E',
+      });
+      slide4.addText('Classification across Pre-Order, Regular advisory, and Scrap calls', {
+        x: 0.8,
+        y: 1.1,
+        fontSize: 12,
+        color: '737373',
+      });
+
+      if (analytics?.callClassification) {
+        const cc = analytics.callClassification;
+        const catRows: any[][] = [
+          [
+            { text: 'Category', options: { bold: true, fill: { color: '0A0A0E' }, color: 'FFFFFF' } },
+            { text: 'Volume', options: { bold: true, fill: { color: '0A0A0E' }, color: 'FFFFFF' } },
+            { text: '% Distribution', options: { bold: true, fill: { color: '0A0A0E' }, color: 'FFFFFF' } },
+            { text: 'Average Duration', options: { bold: true, fill: { color: '0A0A0E' }, color: 'FFFFFF' } },
+          ],
+          [{ text: 'Pre-Order Order Calls' }, { text: `${cc.preOrder}` }, { text: `${cc.preOrderPct}%` }, { text: formatSeconds(cc.avgDurationPreOrder) }],
+          [{ text: 'Regular Advisory Calls' }, { text: `${cc.regular}` }, { text: `${cc.regularPct}%` }, { text: formatSeconds(cc.avgDurationRegular) }],
+          [{ text: 'Scrap (<8s / IVR / Rings)' }, { text: `${cc.scrap}` }, { text: `${cc.scrapPct}%` }, { text: formatSeconds(cc.avgDurationScrap) }],
+        ];
+        slide4.addTable(catRows, {
+          x: 0.8,
+          y: 1.8,
+          w: 8.4,
+          fontSize: 11,
+          border: { pt: 0.5, color: 'CBD5E1' },
+        });
+      }
+
+      await pres.writeFile({ fileName: `FundsIndia_Compliance_Presentation_${new Date().toISOString().slice(0, 10)}.pptx` });
+    } catch (err: unknown) {
+      alert(`PowerPoint export failed: ${(err as Error).message}`);
+    } finally {
+      setIsExporting(false);
+    }
+  };
+
   const total = analytics?.totalScorecards || 0;
   const qStats = analytics?.qStats;
   const classification = analytics?.callClassification;
@@ -186,7 +467,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ archives, isLoading })
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <button
             onClick={fetchAnalytics}
             disabled={isFetchingAnalytics}
@@ -198,12 +479,33 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ archives, isLoading })
           </button>
 
           <button
+            onClick={handleExportExcel}
+            disabled={isExporting}
+            className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-xs transition-all cursor-pointer"
+            title="Download formatted multi-sheet Excel report"
+          >
+            <FileSpreadsheet className="w-3.5 h-3.5 text-white" />
+            <span>{isExporting ? 'Generating...' : 'Export Excel (.XLSX)'}</span>
+          </button>
+
+          <button
+            onClick={handleExportPPT}
+            disabled={isExporting}
+            className="px-3.5 py-2 bg-neutral-900 hover:bg-black text-amber-400 rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-xs transition-all cursor-pointer border border-neutral-700"
+            title="Download executive PowerPoint presentation deck"
+          >
+            <FileText className="w-3.5 h-3.5 text-amber-400" />
+            <span>{isExporting ? 'Generating...' : 'Export PPT (.PPTX)'}</span>
+          </button>
+
+          <button
             onClick={handleExportCSV}
             disabled={isExporting}
-            className="px-4 py-2 bg-amber-400 hover:bg-amber-500 text-black rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-xs transition-all cursor-pointer"
+            className="px-3 py-2 bg-amber-400 hover:bg-amber-300 text-black rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-xs transition-all cursor-pointer"
+            title="Export raw CSV data"
           >
             <Download className="w-3.5 h-3.5 text-black" />
-            <span>{isExporting ? 'Generating...' : 'Export Audit Report'}</span>
+            <span>CSV</span>
           </button>
         </div>
       </div>

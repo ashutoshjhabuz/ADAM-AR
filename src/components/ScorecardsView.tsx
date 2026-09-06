@@ -16,7 +16,9 @@ import {
   ChevronRight,
   Send,
   Download,
+  FileSpreadsheet,
 } from 'lucide-react';
+import * as XLSX from 'xlsx';
 import type { ScorecardRecord } from '../types';
 import { TranscriptHighlighter } from './TranscriptHighlighter';
 
@@ -114,6 +116,167 @@ Comment: ${sc.audit_comment || 'Pre Order Confirmation is as per the Regulatory 
     alert(`Scorecard #${sc.id} copied to clipboard!`);
   };
 
+  const downloadScorecardWord = (sc: ScorecardRecord) => {
+    const isFatal = sc.is_fatal || sc.q1_status === 'FAIL' || sc.q2_status === 'FAIL' || sc.q5_status === 'FAIL';
+    const calculatedScore = isFatal ? 0 : (sc.score !== null ? Math.max(sc.score, 4) : 5);
+    const displayStars = isFatal ? '*' : '*'.repeat(Math.max(1, Math.min(5, calculatedScore)));
+
+    const htmlContent = `
+      <html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'>
+      <head><title>Scorecard #${sc.id}</title>
+      <style>
+        body { font-family: Arial, sans-serif; font-size: 10pt; color: #111; }
+        table { border-collapse: collapse; width: 100%; margin-top: 10px; }
+        th, td { border: 1px solid #333; padding: 6px 8px; text-align: left; }
+        .header { background-color: #f7d54e; font-weight: bold; text-align: center; }
+        .sub-header { background-color: #f2f2f2; font-weight: bold; }
+        .total { background-color: #d4edda; font-weight: bold; }
+        .fatal { color: #b00020; font-weight: bold; }
+      </style>
+      </head>
+      <body>
+        <table>
+          <tr><th colspan="4" class="header">Offline Pre Order Confirmation Call Audit Score Card</th></tr>
+          <tr>
+            <td colspan="2"><b>Caller Name:</b> ${sc.caller_name || '—'}</td>
+            <td colspan="2"><b>Team:</b> ${sc.team || '—'}</td>
+          </tr>
+          <tr>
+            <td colspan="2"><b>Client ID:</b> ${sc.client || '—'}</td>
+            <td colspan="2"><b>Phone Number:</b> ${sc.trade_phone || sc.calling_number || '—'}</td>
+          </tr>
+          <tr>
+            <td colspan="2"><b>Trade Date:</b> ${sc.trade_date || sc.call_date || '—'}</td>
+            <td colspan="2"><b>Audit Date:</b> ${sc.created_at ? sc.created_at.slice(0, 10) : '—'}</td>
+          </tr>
+          <tr class="sub-header">
+            <th style="width: 60%;">PARAMETERS</th>
+            <th style="width: 12%; text-align: center;">Mark</th>
+            <th style="width: 14%; text-align: center;">Flag</th>
+            <th style="width: 14%; text-align: center;">Score</th>
+          </tr>
+          <tr>
+            <td>1. Confirmation given in the Customer's Registered / authorised Number ?<br/><small>Evidence: "${sc.q1_evidence || ''}"</small></td>
+            <td style="text-align: center;">${sc.q1_status === 'PASS' ? '1' : '0'}</td>
+            <td style="text-align: center;" class="fatal">FATAL</td>
+            <td style="text-align: center;">${sc.q1_status === 'PASS' ? 'Yes' : 'No'}</td>
+          </tr>
+          <tr>
+            <td>2. Pre Order Confirmation is as per the Regulatory Norms? (Client code verbal confirmed)<br/><small>Evidence: "${sc.q2_evidence || ''}"</small></td>
+            <td style="text-align: center;">${sc.q2_status === 'PASS' ? '1' : '0'}</td>
+            <td style="text-align: center;" class="fatal">FATAL</td>
+            <td style="text-align: center;">${sc.q2_status === 'PASS' ? 'Yes' : 'No'}</td>
+          </tr>
+          <tr>
+            <td>3. Wasn't pre-order partial (Stock, price & qty confirmed)<br/><small>Evidence: "${sc.q3_evidence || ''}"</small></td>
+            <td style="text-align: center;">${sc.q3_status === 'PASS' ? '1' : '0'}</td>
+            <td style="text-align: center;"></td>
+            <td style="text-align: center;">${sc.q3_status === 'PASS' ? 'Yes' : 'No'}</td>
+          </tr>
+          <tr>
+            <td>4. Customer Acknowledge the same?<br/><small>Evidence: "${sc.q4_evidence || 'Customer affirmative acknowledgement confirmed.'}"</small></td>
+            <td style="text-align: center;">1</td>
+            <td style="text-align: center;"></td>
+            <td style="text-align: center;">Yes</td>
+          </tr>
+          <tr>
+            <td>5. Wasn't there any Return Commitment ?<br/><small>Evidence: "${sc.q5_evidence || ''}"</small></td>
+            <td style="text-align: center;">${sc.q5_status === 'PASS' ? '1' : '0'}</td>
+            <td style="text-align: center;" class="fatal">FATAL</td>
+            <td style="text-align: center;">${sc.q5_status === 'PASS' ? 'Yes' : 'No'}</td>
+          </tr>
+          <tr class="total">
+            <td style="text-align: right;"><b>TOTAL</b></td>
+            <td style="text-align: center;"><b>5</b></td>
+            <td style="text-align: center;"><b>${displayStars}</b></td>
+            <td style="text-align: center;"><b>${calculatedScore}</b></td>
+          </tr>
+          <tr>
+            <td colspan="4"><b>Comment about the call:</b> ${sc.audit_comment || 'Pre Order Confirmation is as per the Regulatory Norm.'}</td>
+          </tr>
+        </table>
+      </body>
+      </html>
+    `;
+
+    const blob = new Blob(['\ufeff' + htmlContent], { type: 'application/msword' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `Scorecard_${sc.id}_${sc.client || 'Client'}_${(sc.caller_name || 'Advisor').replace(/\s+/g, '_')}.doc`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  const downloadScorecardExcel = (sc: ScorecardRecord) => {
+    const isFatal = sc.is_fatal || sc.q1_status === 'FAIL' || sc.q2_status === 'FAIL' || sc.q5_status === 'FAIL';
+    const calculatedScore = isFatal ? 0 : (sc.score !== null ? Math.max(sc.score, 4) : 5);
+    const displayStars = isFatal ? '*' : '*'.repeat(Math.max(1, Math.min(5, calculatedScore)));
+
+    const rows = [
+      ['Offline Pre Order Confirmation Call Audit Score Card', '', '', ''],
+      ['Caller Name:', sc.caller_name || '—', 'Team:', sc.team || '—'],
+      ['Client ID:', sc.client || '—', 'Phone Number:', sc.trade_phone || sc.calling_number || '—'],
+      ['Trade Date:', sc.trade_date || sc.call_date || '—', 'Audit Date:', sc.created_at ? sc.created_at.slice(0, 10) : '—'],
+      ['', '', '', ''],
+      ['PARAMETERS', 'Mark', 'Flag', 'Score'],
+      ["1. Confirmation given in the Customer's Registered / authorised Number ?", sc.q1_status === 'PASS' ? 1 : 0, 'FATAL', sc.q1_status === 'PASS' ? 'Yes' : 'No'],
+      ['2. Pre Order Confirmation is as per the Regulatory Norms?', sc.q2_status === 'PASS' ? 1 : 0, 'FATAL', sc.q2_status === 'PASS' ? 'Yes' : 'No'],
+      ["3. Wasn't pre-order partial (Stock, price & qty confirmed)", sc.q3_status === 'PASS' ? 1 : 0, '', sc.q3_status === 'PASS' ? 'Yes' : 'No'],
+      ['4. Customer Acknowledge the same?', 1, '', 'Yes'],
+      ["5. Wasn't there any Return Commitment ?", sc.q5_status === 'PASS' ? 1 : 0, 'FATAL', sc.q5_status === 'PASS' ? 'Yes' : 'No'],
+      ['TOTAL', 5, displayStars, calculatedScore],
+      ['', '', '', ''],
+      ['Comment about the call:', sc.audit_comment || 'Pre Order Confirmation is as per the Regulatory Norm.', '', ''],
+    ];
+
+    const ws = XLSX.utils.aoa_to_sheet(rows);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, `Scorecard_${sc.id}`);
+    XLSX.writeFile(wb, `Scorecard_${sc.id}_${sc.client || 'Client'}.xlsx`);
+  };
+
+  const downloadAllScorecardsExcel = () => {
+    if (filtered.length === 0) {
+      alert('No scorecards to download.');
+      return;
+    }
+    const data = filtered.map((sc) => {
+      const isFatal = sc.is_fatal || sc.q1_status === 'FAIL' || sc.q2_status === 'FAIL' || sc.q5_status === 'FAIL';
+      const scoreVal = isFatal ? 0 : (sc.score !== null ? Math.max(sc.score, 4) : 5);
+      return {
+        'Scorecard ID': sc.id,
+        'Call Ref ID': sc.call_id || '—',
+        'Trade Date': sc.trade_date || sc.call_date || '—',
+        'Audit Date': sc.created_at ? sc.created_at.slice(0, 10) : '—',
+        'Advisor / Caller': sc.caller_name || '—',
+        'Team': sc.team || '—',
+        'Client ID / UCC': sc.client || '—',
+        'Calling / Registered Phone': sc.trade_phone || sc.calling_number || '—',
+        'Q1 Registered Phone': sc.q1_status,
+        'Q1 Evidence': sc.q1_evidence || '',
+        'Q2 Client Code Verbal': sc.q2_status,
+        'Q2 Evidence': sc.q2_evidence || '',
+        'Q3 Stock Price Qty': sc.q3_status,
+        'Q3 Evidence': sc.q3_evidence || '',
+        'Q4 Customer Ack': 'PASS',
+        'Q5 No Return Commitment': sc.q5_status,
+        'Q5 Evidence': sc.q5_evidence || '',
+        'Fatal Flag': isFatal ? 'YES (FATAL)' : 'NO',
+        'Total Score (0-5)': scoreVal,
+        'Stars Rating': isFatal ? '*' : '*'.repeat(scoreVal),
+        'Audit Comment': sc.audit_comment || '',
+      };
+    });
+
+    const ws = XLSX.utils.json_to_sheet(data);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'All_Scorecards');
+    XLSX.writeFile(wb, `ADAM_AR_All_Scorecards_${new Date().toISOString().slice(0, 10)}.xlsx`);
+  };
+
   const handleSendSingle = async (sc: ScorecardRecord) => {
     const targetEmail = prompt(
       `Send Scorecard #${sc.id} to Advisor Email:`,
@@ -155,6 +318,14 @@ Comment: ${sc.audit_comment || 'Pre Order Confirmation is as per the Regulatory 
         </div>
 
         <div className="flex items-center gap-2 flex-wrap">
+          <button
+            onClick={downloadAllScorecardsExcel}
+            className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl shadow-xs text-xs transition-colors cursor-pointer flex items-center gap-1.5"
+            title="Download all filtered scorecards in a unified Excel spreadsheet"
+          >
+            <FileSpreadsheet className="w-3.5 h-3.5" />
+            <span>Bulk Download (Excel)</span>
+          </button>
           {onRunAllAudits && (
             <button
               onClick={handleRunAll}
@@ -509,17 +680,33 @@ Comment: ${sc.audit_comment || 'Pre Order Confirmation is as per the Regulatory 
                     <span>{expandedTranscriptId === sc.id ? 'Hide Transcript' : 'Transcript & Evidence'}</span>
                   </button>
 
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <button
+                      onClick={() => downloadScorecardWord(sc)}
+                      className="px-2.5 py-1.5 rounded-lg border border-neutral-300 bg-neutral-50 hover:bg-neutral-100 text-neutral-800 text-xs font-semibold flex items-center gap-1 cursor-pointer"
+                      title="Download Scorecard in Microsoft Word (.doc) format"
+                    >
+                      <Download className="w-3.5 h-3.5 text-blue-600" />
+                      <span>Word</span>
+                    </button>
+                    <button
+                      onClick={() => downloadScorecardExcel(sc)}
+                      className="px-2.5 py-1.5 rounded-lg border border-neutral-300 bg-neutral-50 hover:bg-neutral-100 text-neutral-800 text-xs font-semibold flex items-center gap-1 cursor-pointer"
+                      title="Download Scorecard in Excel (.xlsx) format"
+                    >
+                      <Download className="w-3.5 h-3.5 text-emerald-600" />
+                      <span>Excel</span>
+                    </button>
                     <button
                       onClick={() => copyScorecard(sc)}
-                      className="px-3 py-1.5 rounded-lg border border-neutral-300 bg-neutral-50 hover:bg-neutral-100 text-neutral-800 text-xs font-semibold flex items-center gap-1 cursor-pointer"
+                      className="px-2.5 py-1.5 rounded-lg border border-neutral-300 bg-neutral-50 hover:bg-neutral-100 text-neutral-800 text-xs font-semibold flex items-center gap-1 cursor-pointer"
                     >
                       <Copy className="w-3.5 h-3.5 text-amber-500" />
-                      <span>Copy Text</span>
+                      <span>Copy</span>
                     </button>
                     <button
                       onClick={() => printScorecard(sc.id)}
-                      className="px-3 py-1.5 rounded-lg border border-neutral-300 bg-neutral-50 hover:bg-neutral-100 text-neutral-800 text-xs font-semibold flex items-center gap-1 cursor-pointer"
+                      className="px-2.5 py-1.5 rounded-lg border border-neutral-300 bg-neutral-50 hover:bg-neutral-100 text-neutral-800 text-xs font-semibold flex items-center gap-1 cursor-pointer"
                     >
                       <Printer className="w-3.5 h-3.5 text-neutral-600" />
                       <span>Print / PDF</span>
@@ -530,7 +717,7 @@ Comment: ${sc.audit_comment || 'Pre Order Confirmation is as per the Regulatory 
                       className="px-3.5 py-1.5 rounded-lg bg-black hover:bg-neutral-900 text-amber-400 text-xs font-bold flex items-center gap-1 cursor-pointer border border-amber-400/30"
                     >
                       <Send className="w-3.5 h-3.5" />
-                      <span>{sendingId === sc.id ? 'Sending…' : 'Email to Advisor'}</span>
+                      <span>{sendingId === sc.id ? 'Sending…' : 'Email'}</span>
                     </button>
                   </div>
                 </div>

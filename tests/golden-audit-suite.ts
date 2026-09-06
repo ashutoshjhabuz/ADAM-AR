@@ -110,7 +110,7 @@ assert.strictEqual(q1MismatchWithOtp.status, 'PASS', 'Mismatched numbers with sp
 // 6. Pre-Order Intent Classifier
 console.log('Testing Intent Classification...');
 const preOrderClassification = classifyCallIntent('Hello advisor, please place a buy order for 50 shares of TCS at market price.');
-assert.strictEqual(preOrderClassification.call_type, 'regular');
+assert.strictEqual(preOrderClassification.call_type, 'pre_order');
 
 const regularClassification = classifyCallIntent('Hi, I am calling to discuss market view on Nifty and I need the contract note and ledger statement.');
 assert.strictEqual(regularClassification.call_type, 'regular');

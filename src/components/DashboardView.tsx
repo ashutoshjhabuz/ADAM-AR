@@ -13,6 +13,11 @@ import {
   ArrowRight,
   ShieldCheck,
   Table,
+  Sparkles,
+  Clock,
+  Activity,
+  AlertTriangle,
+  Info,
 } from 'lucide-react';
 import type { PipelineStats } from '../types';
 import type { ActiveTab } from './Sidebar';
@@ -36,14 +41,83 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   const matches = stats?.matches || 0;
   const audits = stats?.audits || 0;
   const scored = stats?.scored || 0;
+  const queued = stats?.queued || 0;
+  const processing = stats?.processing || 0;
   const pendingTranscription = stats?.transcription_pending || 0;
   const failedJobs = stats?.failed || 0;
   const avgScore = stats?.avg_score || 0;
 
+  const isAIActive = processing > 0 || queued > 0 || pendingTranscription > 0;
   const progressPercent = trades > 0 ? Math.min(100, Math.round((scored / trades) * 100)) : totalCalls > 0 ? Math.min(100, Math.round((transcribed / totalCalls) * 100)) : 0;
 
   return (
     <div className="space-y-6">
+      {/* Live AI Status & Activity Banner - Answering "What AI is doing, if not doing anything then why" */}
+      <div className={`p-5 rounded-2xl border shadow-sm transition-all ${
+        isAIActive
+          ? 'bg-gradient-to-r from-amber-50 via-amber-100/40 to-white border-amber-300'
+          : 'bg-white border-neutral-200'
+      }`}>
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+          <div className="flex items-start gap-3.5">
+            <div className={`p-2.5 rounded-xl shrink-0 ${
+              isAIActive ? 'bg-amber-400 text-black animate-pulse' : 'bg-neutral-100 text-neutral-700'
+            }`}>
+              <Sparkles className="w-5 h-5" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-bold uppercase tracking-wider font-mono ${
+                  isAIActive ? 'bg-amber-400 text-black' : 'bg-emerald-100 text-emerald-800'
+                }`}>
+                  <span className={`w-2 h-2 rounded-full ${isAIActive ? 'bg-black animate-ping' : 'bg-emerald-600'}`} />
+                  <span>{isAIActive ? 'AI Active & Working' : 'AI Standby / Idle'}</span>
+                </span>
+                <span className="text-xs text-neutral-500 font-medium">3 Parallel Background Workers</span>
+              </div>
+              <h3 className="text-base font-bold text-neutral-900 mt-1">
+                {isAIActive ? (
+                  <span>
+                    AI is currently processing {processing + queued + pendingTranscription} active background task(s)
+                  </span>
+                ) : (
+                  <span>AI Engine is Idle — All {totalCalls} audio calls &amp; scorecards fully processed</span>
+                )}
+              </h3>
+              <p className="text-xs text-neutral-600 mt-0.5 leading-relaxed max-w-3xl">
+                {isAIActive ? (
+                  <span>
+                    <b>Current Action:</b> Groq Whisper Large-v3 is transcribing pending audio and GPT-OSS is evaluating SEBI Q1–Q5 fatal rules against matched trade parameters.
+                  </span>
+                ) : (
+                  <span>
+                    <b>Why AI is Idle:</b> The pipeline queue is empty ({queued} queued, {processing} processing). All uploaded calls have been transcribed, matched, and deterministic scorecards generated. AI is on standby ready for new audio ZIP uploads or trade spreadsheets.
+                  </span>
+                )}
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              onClick={onStartPipeline}
+              disabled={isLoading}
+              className="px-4 py-2 bg-neutral-900 hover:bg-black text-amber-400 text-xs font-bold rounded-xl flex items-center gap-1.5 border border-neutral-700 transition-all cursor-pointer shadow-xs"
+            >
+              <Activity className="w-3.5 h-3.5" />
+              <span>Poll / Wake AI</span>
+            </button>
+            <button
+              onClick={() => onNavigate('pipeline')}
+              className="px-4 py-2 bg-white hover:bg-neutral-50 text-neutral-800 text-xs font-bold rounded-xl flex items-center gap-1.5 border border-neutral-200 transition-all cursor-pointer shadow-xs"
+            >
+              <span>View Workers</span>
+              <ArrowRight className="w-3.5 h-3.5 text-neutral-400" />
+            </button>
+          </div>
+        </div>
+      </div>
+
       {/* Hero Pipeline Status Banner - Classy Black & Yellow */}
       <div className="bg-[#0b0b0e] text-white rounded-2xl p-6 shadow-xl border border-neutral-800 relative overflow-hidden">
         <div className="flex flex-col md:flex-row md:items-start justify-between gap-4 relative z-10">

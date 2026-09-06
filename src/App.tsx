@@ -18,10 +18,12 @@ import { DiagnosticsView } from './components/DiagnosticsView';
 import { LogsView } from './components/LogsView';
 import { MaintenanceView } from './components/MaintenanceView';
 import { AdminView } from './components/AdminView';
+import { AdamBeeView } from './components/AdamBeeView';
+import { AdamBeeMascot } from './components/AdamBeeMascot';
 import { AuthModal } from './components/AuthModal';
 import { LoginScreen } from './components/LoginScreen';
 import { ErrorBoundary } from './components/ErrorBoundary';
-import { api, clearStoredToken } from './lib/api';
+import { api, clearStoredToken, getStoredToken } from './lib/api';
 
 import type {
   ActiveTab,
@@ -36,13 +38,26 @@ import type {
   ReportArchive,
   SystemIntegrations,
   UserProfile,
+  AdamBeeTicketRecord,
 } from './types';
 
 export function App() {
   const [activeTab, setActiveTab] = useState<ActiveTab>('dashboard');
+  const [sidebarOpen, setSidebarOpen] = useState(true);
   const [isLoading, setIsLoading] = useState(false);
   const [pipelineRunning, setPipelineRunning] = useState(false);
   const [toastMessage, setToastMessage] = useState<{ text: string; type?: 'success' | 'error' } | null>(null);
+
+  // AdamBee Agent State
+  const [isBeeFlying, setIsBeeFlying] = useState(false);
+  const [adamBeeTickets, setAdamBeeTickets] = useState<AdamBeeTicketRecord[]>(() => {
+    try {
+      const saved = localStorage.getItem('adambee_tickets');
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
 
   // Core Data State
   const [stats, setStats] = useState<PipelineStats | null>(null);
@@ -69,15 +84,23 @@ export function App() {
   };
 
   const verifyUserSession = useCallback(async () => {
+    const token = getStoredToken();
+    if (!token) {
+      setCurrentUser(null);
+      setIsCheckingAuth(false);
+      return;
+    }
     try {
       const res = await api.verifySession();
       if (res.ok && res.user) {
         setCurrentUser(res.user);
       } else {
+        clearStoredToken();
         setCurrentUser(null);
       }
     } catch {
-      // Session unauthenticated or token expired
+      // Session unauthenticated or token invalid
+      clearStoredToken();
       setCurrentUser(null);
     } finally {
       setIsCheckingAuth(false);
@@ -85,6 +108,9 @@ export function App() {
   }, []);
 
   const fetchAllData = useCallback(async () => {
+    const token = getStoredToken();
+    if (!token) return;
+
     try {
       const [
         statsRes,
@@ -127,10 +153,14 @@ export function App() {
       if (diagRes.status === 'fulfilled') setDiagnostics(diagRes.value);
       if (logsRes.status === 'fulfilled' && Array.isArray(logsRes.value)) setLogs(logsRes.value);
 
-      // Check if any was 401 unauthorized
+      // Verify before logging out on 401
       const firstRejected = [statsRes, callsRes, tradesRes].find((r) => r.status === 'rejected') as PromiseRejectedResult | undefined;
       if (firstRejected && (firstRejected.reason as any)?.status === 401) {
-        setCurrentUser(null);
+        const verifyRes = await api.verifySession().catch(() => null);
+        if (!verifyRes || !verifyRes.ok) {
+          clearStoredToken();
+          setCurrentUser(null);
+        }
       }
     } catch (err) {
       console.error('Data fetch error:', err);
@@ -138,10 +168,25 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    verifyUserSession();
-    fetchAllData();
-    const interval = setInterval(fetchAllData, 4000);
-    return () => clearInterval(interval);
+    let active = true;
+    const initialize = async () => {
+      await verifyUserSession();
+      if (active && getStoredToken()) {
+        fetchAllData();
+      }
+    };
+    initialize();
+
+    const interval = setInterval(() => {
+      if (getStoredToken()) {
+        fetchAllData();
+      }
+    }, 4000);
+
+    return () => {
+      active = false;
+      clearInterval(interval);
+    };
   }, [fetchAllData, verifyUserSession]);
 
   const handleLogout = async () => {
@@ -293,11 +338,30 @@ export function App() {
     showToast('Live operational data permanently cleared.');
   };
 
+  const handleTriggerBee = () => {
+    setIsBeeFlying(true);
+    showToast('AdamBee initiated: Harvesting active CRM & screen ticket elements...');
+  };
+
+  const handleFinishBeeFlight = (harvested: AdamBeeTicketRecord) => {
+    setIsBeeFlying(false);
+    setAdamBeeTickets((prev) => {
+      const next = [harvested, ...prev];
+      localStorage.setItem('adambee_tickets', JSON.stringify(next));
+      return next;
+    });
+    showToast(`AdamBee captured ticket #${harvested.ticketId} for UCC ${harvested.clientId || 'Client'}!`);
+  };
+
   // Header Titles Map
   const tabTitles: Record<ActiveTab, { title: string; subtitle: string }> = {
     dashboard: {
       title: 'Operations Dashboard',
       subtitle: 'Real-time overview of call ingestion, Groq Whisper transcription, trade matching, and compliance scoring.',
+    },
+    adambee: {
+      title: 'AdamBee Screen & CRM Ticket Auditor',
+      subtitle: 'Autonomous crawler and ticket analyzer: Harvest page elements, UCC codes, and customer support tickets across browser screens.',
     },
     tata: {
       title: 'Tata Teleservices Enterprise Telephony',
@@ -389,13 +453,19 @@ export function App() {
   return (
     <div className="flex min-h-screen bg-slate-100 text-slate-900 font-sans antialiased">
       {/* Sidebar */}
-      <Sidebar activeTab={activeTab} onTabChange={setActiveTab} stats={stats} />
+      <Sidebar
+        activeTab={activeTab}
+        onTabChange={setActiveTab}
+        stats={stats}
+        isOpen={sidebarOpen}
+        onToggle={() => setSidebarOpen((prev) => !prev)}
+      />
 
       {/* Main Content Area */}
       <div className="flex-1 flex flex-col min-w-0">
         <Header
-          title={tabTitles[activeTab].title}
-          subtitle={tabTitles[activeTab].subtitle}
+          title={tabTitles[activeTab]?.title || 'Operations'}
+          subtitle={tabTitles[activeTab]?.subtitle || 'Compliance Audit Engine'}
           onRefresh={handleRefresh}
           onStartPipeline={handleStartPipeline}
           isLoading={isLoading}
@@ -404,6 +474,9 @@ export function App() {
           onOpenAuth={() => setIsAuthModalOpen(true)}
           onLogout={handleLogout}
           groqConfigured={Boolean(integrations?.groq_configured)}
+          onTriggerBee={handleTriggerBee}
+          sidebarOpen={sidebarOpen}
+          onToggleSidebar={() => setSidebarOpen((prev) => !prev)}
         />
 
         {/* User Authentication & API Key Setup Modal */}
@@ -443,6 +516,26 @@ export function App() {
                 onNavigate={setActiveTab}
                 onStartPipeline={handleStartPipeline}
                 isLoading={isLoading}
+              />
+            )}
+
+            {activeTab === 'adambee' && (
+              <AdamBeeView
+                tickets={adamBeeTickets}
+                onTriggerBee={handleTriggerBee}
+                onClearTickets={() => {
+                  setAdamBeeTickets([]);
+                  localStorage.removeItem('adambee_tickets');
+                  showToast('All harvested AdamBee tickets cleared.');
+                }}
+                onAddTicket={(ticket) => {
+                  setAdamBeeTickets((prev) => {
+                    const next = [ticket, ...prev];
+                    localStorage.setItem('adambee_tickets', JSON.stringify(next));
+                    return next;
+                  });
+                  showToast(`Ticket #${ticket.ticketId} saved.`);
+                }}
               />
             )}
 
@@ -584,6 +677,9 @@ export function App() {
 
         {/* Floating Compliance AI Assistant */}
         <ComplianceChatbot />
+
+        {/* AdamBee Screen Crawler Mascot */}
+        <AdamBeeMascot isFlying={isBeeFlying} onFinishFlight={handleFinishBeeFlight} />
       </div>
     </div>
   );

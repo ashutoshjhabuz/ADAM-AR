@@ -88,9 +88,12 @@ export function calculateAuthoritativeScore(
     review_reasons.push('Q5: Dialogue contains statement requiring review for potential return commitment.');
   }
 
-  // Non-fatal review notes. Q4 is intentionally excluded from scoring.
+  // Non-fatal review notes
   if (q3Status === 'REVIEW') {
     review_reasons.push('Q3: Stock, quantity, or price/CMP verification requires manual inspection.');
+  }
+  if (q4Status === 'REVIEW') {
+    review_reasons.push('Q4: Customer acknowledgement requires compliance inspection.');
   }
 
   const is_fatal = fatal_reasons.length > 0;
@@ -104,9 +107,10 @@ export function calculateAuthoritativeScore(
     disposition = 'NON_COMPLIANT';
     audit_comment = `NON-COMPLIANT: Fatal compliance violation (${fatal_reasons.join(' ')}). Score set to 0.`;
   } else {
-    // Q4 is retained for evidence display only and never changes the score.
+    // Non-fatal marks calculation: base 5, deduct 1 for non-pass in Q3 and Q4
     let currentScore = 5;
     if (q3Status !== 'PASS') currentScore -= 1;
+    if (q4Status !== 'PASS') currentScore -= 1;
 
     score = Math.max(0, currentScore);
 

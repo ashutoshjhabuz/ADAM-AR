@@ -363,7 +363,25 @@ export type ActiveTab =
   | 'diagnostics'
   | 'logs'
   | 'maintenance'
-  | 'admin';
+  | 'admin'
+  | 'adambee';
+
+export interface AdamBeeTicketRecord {
+  id: string;
+  sourceUrl: string;
+  pageTitle: string;
+  extractedAt: string;
+  ticketId?: string;
+  clientId?: string;
+  advisorName?: string;
+  phoneNumber?: string;
+  tradeSymbol?: string;
+  category?: string;
+  riskScore: number;
+  complianceStatus: 'COMPLIANT' | 'FLAGGED' | 'FATAL' | 'PENDING';
+  rawSnippets: string[];
+  findings: string;
+}
 
 export interface ComplianceQuestionResult {
   status: 'PASS' | 'FAIL' | 'REVIEW';

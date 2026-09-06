@@ -271,8 +271,20 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(data),
     }),
+  updateUserPassword: (id: number, password: string) =>
+    apiRequest<{ ok: boolean; message: string }>(`/api/admin/users/${id}/password`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password }),
+    }),
   deleteAdminUser: (id: number) =>
     apiRequest<{ ok: boolean; message: string }>(`/api/admin/users/${id}`, { method: 'DELETE' }),
   clearAllDatabase: () =>
-    apiRequest<{ ok: boolean; message: string }>('/api/admin/clear-database', { method: 'POST' }),
+    apiRequest<{ ok: boolean; message: string; archived_snapshot?: boolean; cleared_counts?: any }>('/api/admin/clear-database', { method: 'POST' }),
+  getClearedBackups: () =>
+    apiRequest<{ ok: boolean; backups: any[] }>('/api/admin/cleared-backups'),
+  getClearedBackupDownloadUrl: (id: number) => {
+    const token = getStoredToken();
+    return `/api/admin/cleared-backups/${id}/download?token=${encodeURIComponent(token || '')}`;
+  },
 };

@@ -401,14 +401,14 @@ runTest('Test R: Unified scoring engine consistency', () => {
   assert.strictEqual(res4.finalScore, 4);
   assert.strictEqual(res4.isFatal, false);
 
-  // Q4 is display-only, so only Q3 reduces the score -> 4/5
+  // Both Q3 and Q4 FAIL -> 3/5
   const q3q4Audit: UnifiedAuditOutput = {
     ...cleanAudit,
     q3: { status: 'FAIL', evidence: 'Qty missing', reason: 'Q3' },
     q4: { status: 'FAIL', evidence: 'Customer silent', reason: 'Q4' },
   };
   const res3 = calculateAuthoritativeScore(q3q4Audit);
-  assert.strictEqual(res3.finalScore, 4);
+  assert.strictEqual(res3.finalScore, 3);
   assert.strictEqual(res3.isFatal, false);
 });
 
@@ -523,7 +523,7 @@ runTest('Test U: End-to-end audit accuracy on 10 calls', () => {
     { text: 'WIA01. Buy 100 TCS at CMP. Client: Yes.', expectedScore: 5 },
     { text: 'WIA02. Buy 50 INFY at 1450. Client: Yes.', expectedScore: 5 },
     { text: 'WIA03. Buy Reliance at CMP. Client: Yes.', expectedScore: 4 }, // Missing qty
-    { text: 'WIA04. Buy 100 SBIN at CMP. Client: No cancel.', expectedScore: 5 }, // Q4 is ignored
+    { text: 'WIA04. Buy 100 SBIN at CMP. Client: No cancel.', expectedScore: 4 }, // Negated consent
     { text: 'WIA05. Buy 100 ITC at CMP. Client: Yes. 100% safe return pakka profit.', expectedScore: 0 }, // Fatal return guarantee
     { text: 'WIA06. Buy 200 HDFC Bank at 1600. Client: Proceed.', expectedScore: 5 },
     { text: 'WIA07. Buy 100 Tata Motors at CMP. Client: Okay.', expectedScore: 5 },
