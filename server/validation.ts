@@ -48,6 +48,7 @@ export const BulkEmailSendSchema = z.object({
   subject: z.string().max(256).optional().nullable(),
   to: z.string().optional().nullable(),
   cc: z.string().max(512).optional().nullable(),
+  marker_filter: z.string().max(32).optional().nullable(),
 });
 
 export const ArchivePeriodSchema = z.object({

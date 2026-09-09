@@ -70,15 +70,85 @@ export interface CallRecord {
   call_time?: string;
   duration_seconds?: number;
   source: string;
-  status: 'imported' | 'transcribing' | 'transcribed' | 'linked_duplicate' | 'failed';
+  status: 'imported' | 'transcribing' | 'transcribed' | 'linked_duplicate' | 'failed' | 'audited' | 'scrap' | 'regular' | 'needs_review' | 'blocked';
   call_type?: 'unknown' | 'pre_order' | 'regular' | 'scrap' | 'non_pre_order' | 'review';
   preorder_confidence?: number;
   preorder_evidence?: string;
+  preorder_speaker?: string;
+  preorder_timestamp?: string;
   transcript?: string;
+  transcript_raw?: string;
   transcript_meta?: string;
   transcript_model?: string;
+  // 9-Stage Pipeline state machine fields
+  batch_id?: string;
+  original_filename?: string;
+  file_size?: number;
+  mime_type?: string;
+  import_status?: 'CONFIRMED' | 'REJECTED';
+  identity_status?: 'CONFIRMED' | 'REVIEW' | 'PENDING';
+  identity_source?: string;
+  client_code?: string;
+  transcript_status?: 'VALID' | 'PENDING' | 'REJECTED';
+  classification?: 'PRE_ORDER' | 'REGULAR' | 'SCRAP' | 'REVIEW' | 'PENDING';
+  classification_confidence?: number;
+  classification_evidence?: string;
+  trade_match_status?: 'CONFIRMED' | 'REVIEW' | 'NO_MATCH' | 'PENDING';
+  matched_trade_id?: number | null;
+  trade_match_confidence?: number;
+  trade_match_margin?: number;
+  trade_match_reason?: string;
+  audit_status?: 'AUDITED' | 'PENDING' | 'BLOCKED' | 'REVIEW';
+  processing_status?: 'IDLE' | 'PROCESSING' | 'COMPLETED' | 'FAILED';
+  failure_reason?: string;
+  scrap_reason?: string;
   created_at: string;
   updated_at: string;
+}
+
+export interface ImportBatchRecord {
+  id: number;
+  batch_id: string;
+  total_files: number;
+  uploaded_count: number;
+  status: string;
+  created_at: string;
+}
+
+export interface MissingCallItem {
+  trade_id: number;
+  trade_external_id?: string;
+  client: string;
+  symbol: string;
+  quantity: number;
+  price: number;
+  trade_date: string;
+  trade_phone?: string;
+  reconciliation_status: 'MATCHED' | 'MISSING_CALL' | 'REVIEW';
+  matched_call_id?: number | null;
+  notes: string;
+}
+
+export interface PipelineAccuracyMetrics {
+  total_calls: number;
+  classification_accuracy: number;
+  classification_breakdown: {
+    pre_order: number;
+    regular: number;
+    scrap: number;
+    review: number;
+  };
+  trade_matching_accuracy: number;
+  trade_match_breakdown: {
+    confirmed: number;
+    review: number;
+    no_match: number;
+  };
+  transcription_success_rate: number;
+  identity_resolution_rate: number;
+  audit_completion_rate: number;
+  false_fatal_rate: number;
+  review_rate: number;
 }
 
 export interface TradeRecord {
@@ -96,6 +166,10 @@ export interface TradeRecord {
   side?: 'BUY' | 'SELL' | 'B' | 'S';
   quantity?: number;
   price?: number;
+  price_display?: string;
+  is_combined?: boolean | number;
+  split_count?: number;
+  notes?: string;
   raw_json?: string;
   created_at: string;
 }
@@ -356,6 +430,7 @@ export type ActiveTab =
   | 'audit'
   | 'pipeline'
   | 'master_table'
+  | 'manual_trade_audit'
   | 'scorecards'
   | 'mail'
   | 'reports'
@@ -500,4 +575,37 @@ export interface FailedJobItem {
   created_at: string;
   updated_at: string;
 }
+
+export interface MissingCallTrade {
+  id: number;
+  external_id?: string;
+  dealer?: string;
+  advisor_name?: string;
+  team?: string;
+  trade_date?: string;
+  trade_time?: string;
+  client?: string;
+  client_number?: string;
+  phone_number?: string;
+  symbol?: string;
+  side?: string;
+  quantity?: number;
+  price?: number;
+  has_scorecard?: boolean;
+  scorecard_id?: number | null;
+  audit_status?: 'PENDING_AUDIT' | 'AUDITED_MAIL' | 'REVIEW';
+  mail_reference?: string;
+}
+
+export interface DatabaseWorkspaceInfo {
+  name: string;
+  display_name: string;
+  size_bytes: number;
+  calls_count: number;
+  trades_count: number;
+  scorecards_count: number;
+  is_current: boolean;
+  owner: string;
+}
+
 

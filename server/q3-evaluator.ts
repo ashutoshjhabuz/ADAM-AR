@@ -242,11 +242,11 @@ export function evaluateDeterministicQ3(
   if (!isQtyConfirmed) missingParts.push('quantity');
 
   return {
-    status: 'REVIEW',
-    evidence: evidenceString,
-    reason: `Missing or unverified order parameters: ${missingParts.join(', ')}.`,
+    status: 'FAIL',
+    evidence: `Order verification discrepancy: ${missingParts.join(', ')} missing. ${evidenceString}`,
+    reason: `Missing or unverified order parameters (-1 mark, non-fatal): ${missingParts.join(', ')}.`,
     speaker: 'ADVISOR',
-    confidence: 0.85,
+    confidence: 0.95,
     isStockConfirmed,
     isPriceConfirmed,
     isQtyConfirmed,

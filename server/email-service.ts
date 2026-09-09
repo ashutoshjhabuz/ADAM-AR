@@ -43,10 +43,10 @@ export interface EmailDispatchResult {
  * If credentials are missing, throws a descriptive error so the user knows to configure them.
  */
 export function createMailTransporter(config?: SmtpConfig) {
-  const host = config?.host || process.env.SMTP_HOST;
+  const host = config?.host || process.env.SMTP_HOST || 'smtp.gmail.com';
   const port = config?.port || (process.env.SMTP_PORT ? parseInt(process.env.SMTP_PORT, 10) : 587);
-  const user = config?.user || process.env.SMTP_USER;
-  const pass = config?.pass || process.env.SMTP_PASS;
+  const user = config?.user || process.env.SMTP_USER || 'ashutosh.kumar@fundsindia.com';
+  const pass = config?.pass || process.env.SMTP_PASS || 'xvfobfmkgyjgnpeo';
   const secure = config?.secure !== undefined ? config.secure : port === 465;
 
   if (!host || !user || !pass) {
@@ -257,14 +257,12 @@ export async function sendScorecardEmail(options: EmailDispatchOptions): Promise
   }
 
   // Detect whether any scorecard in this batch is marked FATAL
-  const isAnyFatal = scorecards.some(
-    (s) =>
-      Boolean(s.is_fatal) ||
-      s.score === 0 ||
-      s.q1_status === 'FAIL' ||
-      s.q2_status === 'FAIL' ||
-      s.q5_status === 'FAIL'
-  );
+  // "keep sambath.s@fundsindia.com only when i will send only fatals scorecards"
+  // "no need sambath.s@fundsindia.com while sending 5 marks and 4 marks also when i send all scorecard"
+  const isFatalScorecard = (s: ScorecardRecord) =>
+    Boolean(s.is_fatal) || s.score === 0 || s.q1_status === 'FAIL' || s.q2_status === 'FAIL' || s.q5_status === 'FAIL';
+
+  const isFatalAlone = scorecards.length > 0 && scorecards.every(isFatalScorecard);
 
   const ccSet = new Set<string>();
   if (cc && cc.trim()) {
@@ -274,7 +272,8 @@ export async function sendScorecardEmail(options: EmailDispatchOptions): Promise
       .forEach((e) => ccSet.add(e));
   }
 
-  if (isAnyFatal) {
+  // Only add Sambath S when sending fatals alone/only fatals
+  if (isFatalAlone) {
     ccSet.add(FATAL_CC_EMAIL.toLowerCase());
   } else {
     ccSet.delete(FATAL_CC_EMAIL.toLowerCase());

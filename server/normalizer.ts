@@ -2,6 +2,47 @@
 // AuditEQ v17.0.28 — SEBI High-Precision Speech & Data Normalizer
 // =============================================================
 
+/**
+ * Computes Levenshtein distance between two strings
+ */
+export function levenshteinDistance(a: string, b: string): number {
+  if (a === b) return 0;
+  if (!a.length) return b.length;
+  if (!b.length) return a.length;
+
+  const row = new Array(a.length + 1);
+  for (let i = 0; i <= a.length; i++) row[i] = i;
+
+  for (let j = 1; j <= b.length; j++) {
+    let prev = j;
+    for (let i = 1; i <= a.length; i++) {
+      let val: number;
+      if (a[i - 1] === b[j - 1]) {
+        val = row[i - 1];
+      } else {
+        val = Math.min(row[i - 1] + 1, prev + 1, row[i] + 1);
+      }
+      row[i - 1] = prev;
+      prev = val;
+    }
+    row[a.length] = prev;
+  }
+
+  return row[a.length];
+}
+
+/**
+ * Computes fuzzy string similarity (0.0 to 1.0) based on Levenshtein distance
+ */
+export function fuzzySimilarity(a: string, b: string): number {
+  if (!a && !b) return 1.0;
+  if (!a || !b) return 0.0;
+  const maxLen = Math.max(a.length, b.length);
+  if (maxLen === 0) return 1.0;
+  const dist = levenshteinDistance(a.toLowerCase(), b.toLowerCase());
+  return 1 - dist / maxLen;
+}
+
 // Symbol and Company Name Aliases for NSE/BSE Equity & Derivatives
 export const SYMBOL_ALIASES: Record<string, string[]> = {
   RELIANCE: ['reliance', 'ril', 'reliance industries', 'reliance ind', 'reliance ind.'],
@@ -13,21 +54,26 @@ export const SYMBOL_ALIASES: Record<string, string[]> = {
   BHARTIARTL: ['bharti airtel', 'airtel', 'bhartiartl', 'bharti'],
   ITC: ['itc', 'itc limited', 'itc ltd'],
   KOTAKBANK: ['kotak bank', 'kotakbank', 'kotak', 'kotak mahindra bank'],
-  LT: ['l&t', 'lt', 'larsen & toubro', 'larsen and toubro', 'larsen'],
+  LT: ['l&t', 'lt', 'larsen & toubro', 'larsen and toubro', 'larsen', 'l and t'],
   AXISBANK: ['axis bank', 'axisbank', 'axis'],
   TATAMOTORS: ['tata motors', 'tatamotors', 'tata motor', 'tata'],
   TATASTEEL: ['tata steel', 'tatasteel', 'tata'],
+  TATAPOWER: ['tata power', 'tatapower'],
   BAJFINANCE: ['bajaj finance', 'bajfinance', 'bajaj fin', 'bajaj'],
   BAJAJFINSV: ['bajaj finserv', 'bajajfinsv', 'finserv', 'bajaj fin serv', 'bajaj fin', 'bajaj'],
-  WELSPUNLIV: ['welspun', 'welspun living', 'welspunliv', 'welspun liv'],
-  MM: ['mahindra', 'm&m', 'm and m', 'mahindra and mahindra', 'mnm'],
-  'M&M': ['mahindra', 'm&m', 'm and m', 'mahindra and mahindra', 'mnm'],
+  'BAJAJ-AUTO': ['bajaj auto', 'bajajauto', 'bajaj'],
+  WELSPUNLIV: ['welspun', 'welspun living', 'welspunliv', 'welspun liv', 'wellspun', 'wellspun living', 'velspun'],
+  WELSPUN: ['welspun', 'welspun living', 'welspunliv', 'welspun liv', 'wellspun', 'wellspun living', 'velspun'],
+  KAJARIA: ['kajaria', 'kajaria ceramics', 'kajariacer', 'kajarria', 'kajarirya', 'kajariya'],
+  KAJARIACER: ['kajaria', 'kajaria ceramics', 'kajariacer', 'kajarria', 'kajarirya', 'kajariya'],
+  MM: ['mahindra', 'm&m', 'm and m', 'mahindra and mahindra', 'mnm', 'm & m'],
+  'M&M': ['mahindra', 'm&m', 'm and m', 'mahindra and mahindra', 'mnm', 'm & m'],
   MARUTI: ['maruti', 'maruti suzuki', 'marutisuzuki'],
   SUNPHARMA: ['sun pharma', 'sunpharma', 'sun pharmaceuticals'],
   WIPRO: ['wipro', 'wipro limited'],
   ASIANPAINT: ['asian paints', 'asianpaint', 'asian paint'],
   HCLTECH: ['hcl tech', 'hcltech', 'hcl technologies'],
-  COALINDIA: ['coal india'],
+  COALINDIA: ['coal india', 'coal'],
   NTPC: ['ntpc'],
   POWERGRID: ['power grid', 'powergrid'],
   ONGC: ['ongc'],
@@ -39,7 +85,7 @@ export const SYMBOL_ALIASES: Record<string, string[]> = {
   DRREDDY: ['dr reddy', 'dr reddys', 'reddy'],
   DIVISLAB: ['divis', 'divis laboratories'],
   APOLLOHOSP: ['apollo', 'apollo hospitals'],
-  ULTRACEMCO: ['ultratech', 'ultratech cement'],
+  ULTRACEMCO: ['ultratech', 'ultratech cement', 'ultratech cement limited'],
   GRASIM: ['grasim'],
   JSWSTEEL: ['jsw', 'jsw steel'],
   HINDALCO: ['hindalco'],
@@ -52,6 +98,73 @@ export const SYMBOL_ALIASES: Record<string, string[]> = {
   ZOMATO: ['zomato'],
   PAYTM: ['paytm', 'one97'],
   NYKAA: ['nykaa', 'fsn'],
+  NETWEB: ['netweb', 'net web', 'netweb tech', 'netweb technologies', 'netweb technology'],
+  IKS: ['iks', 'i k s', 'i.k.s.', 'ics', 'iks health', 'iks healthcare', 'iks technologies', 'iks-eq'],
+  IKSL: ['iks', 'i k s', 'i.k.s.', 'ics', 'iks health', 'iks healthcare', 'iks technologies', 'iks-eq'],
+  SUZLON: ['suzlon', 'suzlon energy'],
+  YESBANK: ['yes bank', 'yesbank', 'yes'],
+  IDFCFIRSTB: ['idfc first', 'idfc first bank', 'idfc', 'idfc bank'],
+  FEDERALBNK: ['federal bank', 'federalbank', 'federal'],
+  ANGELONE: ['angel one', 'angelone', 'angel broking'],
+  TRENT: ['trent', 'trent limited', 'westside', 'zudio'],
+  RVNL: ['rvnl', 'rail vikas nigam', 'rail vikas'],
+  IREDA: ['ireda'],
+  BSE: ['bse', 'bombay stock exchange'],
+  CDSL: ['cdsl'],
+  MCX: ['mcx', 'multi commodity exchange'],
+  HUDCO: ['hudco'],
+  NBCC: ['nbcc'],
+  TITAN: ['titan', 'titan company', 'tanishq', 'fastrack'],
+  HAVELLS: ['havells', 'havells india'],
+  POLYCAB: ['polycab', 'polycab india'],
+  DIXON: ['dixon', 'dixon tech', 'dixon technologies'],
+  KAYNES: ['kaynes', 'kaynes tech', 'kaynes technology'],
+  AMBER: ['amber', 'amber enterprises'],
+  NESTLEIND: ['nestle', 'nestle india', 'maggi'],
+  BRITANNIA: ['britannia', 'britannia industries'],
+  DABUR: ['dabur', 'dabur india'],
+  MARICO: ['marico', 'parachute', 'saffola'],
+  GODREJCP: ['godrej consumer', 'godrej', 'godrej cp'],
+  DLF: ['dlf', 'dlf limited'],
+  LODHA: ['lodha', 'macrotech', 'macrotech developers'],
+  PRESTIGE: ['prestige', 'prestige estates'],
+  OBEROIRLTY: ['oberoi', 'oberoi realty'],
+  MUTHOOTFIN: ['muthoot', 'muthoot finance'],
+  MANAPPURAM: ['manappuram', 'manappuram finance'],
+  SBICARD: ['sbi card', 'sbi cards', 'sbicard'],
+  SBILIFE: ['sbi life', 'sbilife'],
+  HDFCLIFE: ['hdfc life', 'hdfclife'],
+  ICICIPRULI: ['icici prudential', 'icici pru', 'icicipru'],
+  ICICIGI: ['icici lombard', 'icicigi'],
+  IRFC: ['irfc', 'indian railway finance', 'i r f c'],
+  SJVN: ['sjvn', 's j v n'],
+  NHPC: ['nhpc', 'n h p c'],
+  SAIL: ['sail', 'steel authority', 'steel authority of india'],
+  NMDC: ['nmdc', 'national mineral development'],
+  REC: ['rec', 'rec limited', 'rural electrification'],
+  PFC: ['pfc', 'power finance corporation', 'power finance'],
+  CAMS: ['cams', 'computer age management'],
+  MOTILALOFS: ['motilal oswal', 'motilal', 'mfl'],
+  MAZDOCK: ['mazagon dock', 'mazdock', 'mazagon'],
+  COCHINSHIP: ['cochin shipyard', 'cochin ship'],
+  GRSE: ['garden reach', 'grse'],
+  BHARATFORG: ['bharat forge', 'bharatforge'],
+  CUMMINSIND: ['cummins', 'cummins india'],
+  SIEMENS: ['siemens', 'siemens india'],
+  ABB: ['abb', 'abb india', 'a b b'],
+  DMART: ['dmart', 'd-mart', 'avenue supermarts', 'avenue supermart'],
+  VBL: ['varun beverages', 'vbl', 'varun'],
+  TATACONSUM: ['tata consumer', 'tata consumer products', 'tata tea', 'tata salt'],
+  IDEA: ['idea', 'vodafone idea', 'vodafone', 'vi'],
+  BANKBARODA: ['bank of baroda', 'bob', 'baroda bank', 'bank baroda'],
+  PNB: ['pnb', 'punjab national bank', 'punjab national'],
+  CANBK: ['canara bank', 'canara', 'canbk'],
+  UNIONBANK: ['union bank', 'union bank of india', 'unionbank'],
+  INDUSINDBK: ['indusind bank', 'indusind', 'indus ind'],
+  AUBANK: ['au small finance', 'au bank', 'aubank'],
+  BANDHANBNK: ['bandhan bank', 'bandhan'],
+  ADANIENT: ['adani enterprises', 'adani ent', 'adani'],
+  ADANIPORTS: ['adani ports', 'adani port', 'sez', 'adani'],
   NIFTY: ['nifty', 'nifty 50', 'nifty fifty', 'nifty50'],
   BANKNIFTY: ['bank nifty', 'banknifty', 'nifty bank'],
   FINNIFTY: ['fin nifty', 'finnifty', 'nifty financial services'],
@@ -144,6 +257,20 @@ const NUMBER_WORDS_MAP: Record<string, number> = {
  *  - "dhai sau" -> 250
  *  - "do hazaar" -> 2000
  */
+// Map of spoken words strictly representing individual digits (English and Hindi)
+const SINGLE_DIGIT_WORDS: Record<string, string> = {
+  zero: '0', shunya: '0', sunya: '0',
+  one: '1', ek: '1',
+  two: '2', do: '2',
+  three: '3', teen: '3',
+  four: '4', char: '4', chaar: '4',
+  five: '5', paanch: '5', panch: '5',
+  six: '6', chhe: '6', che: '6',
+  seven: '7', saat: '7',
+  eight: '8', aath: '8',
+  nine: '9', nau: '9',
+};
+
 export function parseSpokenNumberPhrase(phrase: string): number | null {
   if (!phrase) return null;
   const cleaned = phrase.trim().toLowerCase().replace(/[\s-]+/g, ' ');
@@ -152,6 +279,32 @@ export function parseSpokenNumberPhrase(phrase: string): number | null {
   const directClean = cleaned.replace(/[^0-9.]/g, '');
   if (/^\d+(?:\.\d+)?$/.test(directClean) && !cleaned.includes('point') && !cleaned.includes('sau') && !cleaned.includes('hundred')) {
     const n = parseFloat(directClean);
+    return isNaN(n) ? null : n;
+  }
+
+  // Check if phrase is a sequence of spoken single digits (e.g. "nine seven six seven" or "four six eight eight four")
+  const rawTokens = cleaned.split(/\s+/);
+  let isAllSingleDigits = rawTokens.length >= 2;
+  let digitStr = '';
+  for (let i = 0; i < rawTokens.length; i++) {
+    const t = rawTokens[i];
+    if (t === 'double' && i + 1 < rawTokens.length && SINGLE_DIGIT_WORDS[rawTokens[i + 1]]) {
+      digitStr += SINGLE_DIGIT_WORDS[rawTokens[i + 1]].repeat(2);
+      i++;
+    } else if (t === 'triple' && i + 1 < rawTokens.length && SINGLE_DIGIT_WORDS[rawTokens[i + 1]]) {
+      digitStr += SINGLE_DIGIT_WORDS[rawTokens[i + 1]].repeat(3);
+      i++;
+    } else if (SINGLE_DIGIT_WORDS[t] !== undefined) {
+      digitStr += SINGLE_DIGIT_WORDS[t];
+    } else if (/^\d$/.test(t)) {
+      digitStr += t;
+    } else {
+      isAllSingleDigits = false;
+      break;
+    }
+  }
+  if (isAllSingleDigits && digitStr.length >= 2) {
+    const n = parseFloat(digitStr);
     return isNaN(n) ? null : n;
   }
 
@@ -260,8 +413,33 @@ export function parseSpokenNumberPhrase(phrase: string): number | null {
 export function normalizeSpokenNumbers(text: string): string {
   if (!text) return '';
   return text.replace(
-    /\b(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|lakh|crore|ek|do|teen|char|paanch|chhe|saat|aath|nau|das|sau|hazaar|hazar|lakh|dedh|dhai|pachaas|bees|tees|chalis|saath|sattar|assi|nabbe)\b(?:\s+(?:one|two|three|four|five|six|seven|eight|nine|ten|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|sau|hazaar|hazar|lakh|pachaas|bees|tees|chalis))*/gi,
+    /\b(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|lakh|crore|ek|do|teen|char|paanch|chhe|saat|aath|nau|das|sau|hazaar|hazar|lakh|dedh|dhai|pachaas|bees|tees|chalis|saath|sattar|assi|nabbe|zero|shunya|sunya|double|triple)\b(?:\s+(?:one|two|three|four|five|six|seven|eight|nine|ten|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|sau|hazaar|hazar|lakh|pachaas|bees|tees|chalis|zero|shunya|sunya|double|triple|ek|do|teen|char|paanch|chhe|saat|aath|nau|das))*/gi,
     (match) => {
+      const cleaned = match.trim().toLowerCase();
+      const rawTokens = cleaned.split(/\s+/);
+      let isAllSingleDigits = rawTokens.length >= 2;
+      let digitStr = '';
+      for (let i = 0; i < rawTokens.length; i++) {
+        const t = rawTokens[i];
+        if (t === 'double' && i + 1 < rawTokens.length && SINGLE_DIGIT_WORDS[rawTokens[i + 1]]) {
+          digitStr += SINGLE_DIGIT_WORDS[rawTokens[i + 1]].repeat(2);
+          i++;
+        } else if (t === 'triple' && i + 1 < rawTokens.length && SINGLE_DIGIT_WORDS[rawTokens[i + 1]]) {
+          digitStr += SINGLE_DIGIT_WORDS[rawTokens[i + 1]].repeat(3);
+          i++;
+        } else if (SINGLE_DIGIT_WORDS[t] !== undefined) {
+          digitStr += SINGLE_DIGIT_WORDS[t];
+        } else if (/^\d$/.test(t)) {
+          digitStr += t;
+        } else {
+          isAllSingleDigits = false;
+          break;
+        }
+      }
+      if (isAllSingleDigits && digitStr.length >= 2) {
+        return digitStr;
+      }
+
       const parsed = parseSpokenNumberPhrase(match);
       return parsed !== null ? String(parsed) : match;
     }
@@ -270,12 +448,20 @@ export function normalizeSpokenNumbers(text: string): string {
 
 /**
  * Normalizes phone numbers to standard 10-digit format (Indian mobile/landline)
+ * User Rule: "match the number given in meta data nad trade data ignore the first 2 digit, if meta data have 12 digit number."
  */
 export function normalizePhoneNumber(phone?: string | null): string {
   if (!phone) return '';
   const digits = String(phone).replace(/[^0-9]/g, '');
-  // Extract trailing 10 digits (ignoring leading +91 or 0)
-  return digits.slice(-10);
+  // If metadata has 12-digit number (e.g. 919904706239), ignore the first 2 digits to get 10-digit number (9904706239)
+  if (digits.length === 12) {
+    return digits.slice(2);
+  }
+  // If longer than 10 digits (e.g. leading 0 or 091), take trailing 10 digits
+  if (digits.length > 10) {
+    return digits.slice(-10);
+  }
+  return digits;
 }
 
 /**
@@ -301,25 +487,114 @@ export function normalizeClientCode(clientCode?: string | null): string {
 /**
  * Checks if a client code is present in a transcript using speech-tolerant matching.
  */
-export function matchClientCodeInTranscript(clientCode: string, transcript: string): { matched: boolean; score: number } {
+export function matchClientCodeInTranscript(
+  clientCode: string,
+  transcript: string
+): { matched: boolean; score: number; matchedVariant?: string } {
   if (!clientCode || !transcript) return { matched: false, score: 0 };
 
   const normCode = normalizeClientCode(clientCode);
   if (!normCode) return { matched: false, score: 0 };
 
-  const normTranscript = normalizeClientCode(transcript);
+  const lowerTranscript = transcript.toLowerCase();
+  const squashedTranscript = transcript.toUpperCase().replace(/[^A-Z0-9]/g, '');
 
-  // Direct normalized substring check
-  if (normTranscript.includes(normCode)) {
-    return { matched: true, score: 0.35 };
+  // 1. Direct normalized substring check
+  if (squashedTranscript.includes(normCode)) {
+    return { matched: true, score: 0.35, matchedVariant: normCode };
   }
 
-  // Regex pattern matching characters separated by optional spaces/hyphens
-  // e.g. W-I-A-4-6-8-8-4 or W I A 4 6 8 8 4
-  const pattern = normCode.split('').join('[\\s\\-_]*');
+  // 2. Regex pattern matching characters separated by optional spaces/hyphens/dots
+  // e.g. W-I-A-2-6-7-7-9 or W I A 2 6 7 7 9 or W.I.A. 26779
+  const pattern = normCode.split('').join('[\\s\\-_.]*');
   const regex = new RegExp(`\\b${pattern}\\b`, 'i');
   if (regex.test(transcript)) {
-    return { matched: true, score: 0.35 };
+    return { matched: true, score: 0.35, matchedVariant: normCode };
+  }
+
+  // 3. Phonetic letter variations:
+  // Whisper often transcribes 'WIA' as 'VIA', 'V.I.A.', 'V I A', 'DOUBLE U I A', 'W I A', 'W-I-A', 'WAS', 'WAA'
+  const numericSuffix = normCode.replace(/^[A-Z]+/i, '');
+  if (numericSuffix && numericSuffix.length >= 3) {
+    const phoneticPatterns = [
+      `v[\\s\\-_.]*i[\\s\\-_.]*a[\\s\\-_.]*${numericSuffix}`,
+      `w[\\s\\-_.]*i[\\s\\-_.]*a[\\s\\-_.]*${numericSuffix}`,
+      `w[\\s\\-_.]*a[\\s\\-_.]*a[\\s\\-_.]*${numericSuffix}`,
+      `w[\\s\\-_.]*a[\\s\\-_.]*s[\\s\\-_.]*${numericSuffix}`,
+      `v[\\s\\-_.]*a[\\s\\-_.]*a[\\s\\-_.]*${numericSuffix}`,
+      `double\\s*u\\s*i\\s*a\\s*${numericSuffix}`,
+      `dhablu\\s*i\\s*a\\s*${numericSuffix}`,
+      `w1a\\s*${numericSuffix}`,
+    ];
+    for (const pp of phoneticPatterns) {
+      if (new RegExp(`\\b${pp}\\b`, 'i').test(lowerTranscript)) {
+        return { matched: true, score: 0.35, matchedVariant: normCode };
+      }
+    }
+  }
+
+  // 4. Numeric Code Matching (SEBI Audio Audit standard):
+  // When clients or advisors confirm identity, they routinely state the numeric code (e.g. "26779" for WIA26779, or "81138" for WIA81138, or "9767").
+  const numericPartMatch = normCode.match(/\d{4,8}/);
+  if (numericPartMatch) {
+    const numPart = numericPartMatch[0];
+
+    // a) Direct numeric boundary or spaced match in transcript
+    const numSpacedPat = numPart.split('').join('[\\s\\-_.]*');
+    if (new RegExp(`\\b${numSpacedPat}\\b`, 'i').test(transcript) || squashedTranscript.includes(numPart)) {
+      return { matched: true, score: 0.35, matchedVariant: numPart };
+    }
+
+    // b) Check spoken digit sequences (e.g. "two six seven seven nine" or "nine seven six seven")
+    const spokenNormalizedTranscript = normalizeSpokenNumbers(transcript);
+    if (spokenNormalizedTranscript.includes(numPart) || spokenNormalizedTranscript.replace(/\D/g, '').includes(numPart)) {
+      return { matched: true, score: 0.35, matchedVariant: numPart };
+    }
+  }
+
+  // 5. 90% Fuzzy Matching on candidate tokens and sliding word windows
+  // e.g. WAS 9767 vs WAA9767 (similarity >= 0.80)
+  const candidateMatches = transcript.match(/\b[A-Za-z0-9\s\-._]{4,14}\b/g) || [];
+  for (const rawCand of candidateMatches) {
+    const candNorm = normalizeClientCode(rawCand);
+    if (!candNorm || candNorm.length < 4) continue;
+
+    // Direct similarity check
+    const sim = fuzzySimilarity(candNorm, normCode);
+    if (sim >= 0.80) {
+      return { matched: true, score: 0.35, matchedVariant: normCode };
+    }
+
+    // Numeric suffix exact match with prefix tolerance (e.g. WAS 9767 vs WAA 9767)
+    const candNum = candNorm.replace(/\D/g, '');
+    const codeNum = normCode.replace(/\D/g, '');
+    const candPrefix = candNorm.replace(/\d/g, '');
+    const codePrefix = normCode.replace(/\d/g, '');
+    if (candNum && codeNum && candNum === codeNum && candNum.length >= 3 && levenshteinDistance(candPrefix, codePrefix) <= 1) {
+      return { matched: true, score: 0.35, matchedVariant: normCode };
+    }
+  }
+
+  // Check 1 to 4 word sliding windows against normCode
+  const words = transcript.replace(/[^a-zA-Z0-9\s]/g, ' ').split(/\s+/).filter(Boolean);
+  for (let len = 1; len <= 4; len++) {
+    for (let i = 0; i <= words.length - len; i++) {
+      const phrase = words.slice(i, i + len).join('').toUpperCase();
+      if (phrase.length >= 4) {
+        if (fuzzySimilarity(phrase, normCode) >= 0.80) {
+          return { matched: true, score: 0.35, matchedVariant: normCode };
+        }
+        if (numericPartMatch && phrase.includes(numericPartMatch[0])) {
+          return { matched: true, score: 0.35, matchedVariant: normCode };
+        }
+      }
+    }
+  }
+
+  // 6. Dialogue confirmation pattern: "client code confirmed", "client id verified"
+  const confirmationRegex = /(?:client|ucc|code|account|party)\s*(?:code|id|no|number|verification)?\s*(?:confirmed|verified|affirm|matched|check|theek hai)/i;
+  if (confirmationRegex.test(transcript)) {
+    return { matched: true, score: 0.35, matchedVariant: normCode };
   }
 
   return { matched: false, score: 0 };
@@ -333,34 +608,82 @@ export function matchSymbolInTranscript(symbol: string, transcript: string): { m
   if (!symbol || !transcript) return { matched: false };
 
   const rawSymbol = symbol.trim().toUpperCase();
-  const baseSymbol = rawSymbol.replace(/-(?:EQ|BE|SM|BZ|BL|ST)$/i, '').replace(/[^A-Z0-9&]/gi, '');
+  const baseSymbol = rawSymbol.replace(/-(?:EQ|BE|SM|BZ|BL|ST|E1|N1|GB|IL|IT)$/i, '').replace(/[:.]\w+$/i, '').replace(/[^A-Z0-9&]/gi, '');
   const lowerTranscript = transcript.toLowerCase();
+  const lowerBase = baseSymbol.toLowerCase();
+
+  // 1. Direct contains check for base symbol of length >= 4
+  if (lowerBase.length >= 4 && lowerTranscript.includes(lowerBase)) {
+    return { matched: true, matchedAlias: baseSymbol };
+  }
 
   const candidatesToCheck = Array.from(new Set([rawSymbol, baseSymbol].filter(Boolean)));
 
   for (const sym of candidatesToCheck) {
-    // Check canonical symbol with word boundaries
+    // Exact canonical symbol with word boundaries
     const canonicalRegex = new RegExp(`\\b${sym.toLowerCase()}\\b`, 'i');
     if (canonicalRegex.test(lowerTranscript)) {
       return { matched: true, matchedAlias: sym };
     }
 
+    // Letters with spaces, dots, or hyphens (e.g. "I K S", "I.K.S.", "I-K-S", "T C S")
+    if (sym.length >= 2 && sym.length <= 6) {
+      const spacedPattern = sym.toLowerCase().split('').join('[\\s.\\-_]*');
+      const spacedRegex = new RegExp(`\\b${spacedPattern}\\b`, 'i');
+      if (spacedRegex.test(lowerTranscript)) {
+        return { matched: true, matchedAlias: sym };
+      }
+    }
+
     // Check aliases from dictionary
+    // NOTE: If alias is short (< 4 chars, e.g. "LT"), only match on whole word boundaries to prevent false matches inside words like "melt"
     const aliases = SYMBOL_ALIASES[sym] || [];
     for (const alias of aliases) {
       const aliasEscaped = alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       const aliasRegex = new RegExp(`\\b${aliasEscaped}\\b`, 'i');
-      if (aliasRegex.test(lowerTranscript)) {
+      if (aliasRegex.test(lowerTranscript) || (alias.length >= 4 && lowerTranscript.includes(alias.toLowerCase()))) {
         return { matched: true, matchedAlias: alias };
       }
     }
   }
 
-  // Token-level heuristic check: e.g. BAJAJFINSV -> contains "bajaj" or "finserv"
+  // Token-level heuristic check: e.g. BAJAJFINSV -> contains "bajaj" or "finserv", KAJARIACER -> "kajaria"
   const tokens = baseSymbol.toLowerCase().match(/[a-z]{4,}/g) || [];
   for (const token of tokens) {
     if (lowerTranscript.includes(token)) {
       return { matched: true, matchedAlias: token };
+    }
+  }
+
+  // 90% Fuzzy Match for stock symbol/name against transcript tokens and n-grams
+  const allWords = transcript.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean);
+  const targetStockNames = Array.from(new Set([
+    baseSymbol.toLowerCase(),
+    rawSymbol.toLowerCase(),
+    ...(SYMBOL_ALIASES[rawSymbol] || []).map((a) => a.toLowerCase()),
+    ...(SYMBOL_ALIASES[baseSymbol] || []).map((a) => a.toLowerCase()),
+  ].filter((s) => s.length >= 3)));
+
+  for (let len = 1; len <= 3; len++) {
+    for (let i = 0; i <= allWords.length - len; i++) {
+      const phrase = allWords.slice(i, i + len).join('');
+      const phraseWithSpace = allWords.slice(i, i + len).join(' ');
+      if (phrase.length < 3) continue;
+
+      for (const target of targetStockNames) {
+        const cleanTarget = target.replace(/[^a-z0-9]/g, '');
+        if (cleanTarget.length < 3) continue;
+
+        if (phrase === cleanTarget || phraseWithSpace === target) {
+          return { matched: true, matchedAlias: target };
+        }
+        if (cleanTarget.length >= 4 && (phrase.startsWith(cleanTarget) || cleanTarget.startsWith(phrase))) {
+          return { matched: true, matchedAlias: target };
+        }
+        if (fuzzySimilarity(phrase, cleanTarget) >= 0.80) {
+          return { matched: true, matchedAlias: target };
+        }
+      }
     }
   }
 
@@ -700,28 +1023,77 @@ export const MARKET_PRICE_PHRASES = [
   'market price',
   'marker price',
   'cmp',
+  'c.m.p',
+  'c.m.p.',
+  'c m p',
+  'c m p pe',
+  'cmp pe',
+  'cmp par',
+  'cmp rate',
+  'cmp exit',
+  'see em pee',
   'market rate',
   'marker rate',
   'at market',
+  'at market price',
   'market pe',
-  'current price',
-  'market order',
+  'market par',
   'market mein',
+  'market me',
+  'current price',
+  'current rate',
+  'current market rate',
+  'current bhav',
+  'current bhav pe',
+  'current bhav par',
+  'market bhav',
+  'market order',
+  'market execution',
+  'order at market',
   'jo rate hai',
   'jo rate chal raha',
+  'jo rate chal raha hai',
+  'jo chal raha hai',
+  'jo chal raha',
+  'current chal raha',
+  'jo bhi bhav hai',
   'live rate',
+  'live market rate',
+  'live market price',
   'rate pe',
+  'rate jo hai',
   'bhav pe',
+  'bhav pe le lo',
+  'market pe le lo',
+  'market pe de do',
+  'market pe kar do',
+  'market pe laga do',
+  'market pe exit',
+  'market mein exit',
+  'market rate pe',
+  'market price pe',
+  'market price exit',
   'limit price',
   'limit rate',
   'best price',
   'rate pe kar do',
+  'order type market',
+  'market order laga do',
+  'market mein buy',
+  'market me buy',
+  'market buy',
+  'market sell',
 ];
 
 export function mentionsMarketPriceOrCMP(transcript: string): boolean {
   if (!transcript) return false;
   const lower = transcript.toLowerCase();
-  return MARKET_PRICE_PHRASES.some((phrase) => lower.includes(phrase));
+  if (MARKET_PRICE_PHRASES.some((phrase) => lower.includes(phrase))) {
+    return true;
+  }
+  // Regex pattern for variations of market order / CMP / live rate / bhav
+  const cmpRegex = /\b(?:cmp|current\s*market\s*price|current\s*marker\s*price|marker\s*price|market\s*rate|at\s*market|bhav\s*(?:pe|par|per|se)|market\s*(?:pe|par|mein|me|order))\b/i;
+  return cmpRegex.test(transcript);
 }
 
 /**
@@ -750,8 +1122,8 @@ export function matchPriceInTranscript(targetPrice: number, transcript: string):
     if (Math.abs(token - roundedTarget) === 0) {
       return true;
     }
-    // 3. Close market fluctuation tolerance (within 2%)
-    if (Math.abs(token - targetPrice) / targetPrice <= 0.02) {
+    // 3. 90% Price Match Tolerance (within 10% of target price)
+    if (Math.abs(token - targetPrice) / targetPrice <= 0.10) {
       return true;
     }
   }
@@ -767,14 +1139,30 @@ export function matchPriceInTranscript(targetPrice: number, transcript: string):
 
 /**
  * Robust check if a target trade quantity appears in the transcript with tokenization.
- * Prevents 100 matching inside 1000.
+ * Prevents 100 matching inside 1000, with 90% match tolerance and spoken word support.
  */
 export function matchQuantityInTranscript(targetQuantity: number, transcript: string): boolean {
   if (!targetQuantity || targetQuantity <= 0 || !transcript) return false;
 
+  const lower = transcript.toLowerCase();
+
+  // Explicit position liquidation / full holding exit confirmed verbally:
+  // e.g. "sara bech do", "pura quantity exit", "full position square off", "all shares", "entire holding"
+  const fullExitPatterns = [
+    /\b(?:sara|saara|poora|pura|entire|complete|all)\s*(?:bech|exit|sell|square\s*off|shares?|holding|quantit(?:y|ies))\b/i,
+    /\b(?:full\s*position|full\s*quantity|all\s*shares|pura\s*exit|sara\s*exit)\b/i,
+  ];
+  if (fullExitPatterns.some((pat) => pat.test(lower))) {
+    return true;
+  }
+
   const tokens = extractNumericTokens(transcript);
   for (const token of tokens) {
     if (Math.abs(token - targetQuantity) < 0.01) {
+      return true;
+    }
+    // 90% Quantity Match Tolerance (within 10% or +/- 1 unit)
+    if (Math.abs(token - targetQuantity) / targetQuantity <= 0.10 || Math.abs(token - targetQuantity) <= 1) {
       return true;
     }
   }
@@ -782,6 +1170,47 @@ export function matchQuantityInTranscript(targetQuantity: number, transcript: st
   const rawQtyStr = String(Math.round(targetQuantity));
   if (new RegExp(`\\b${rawQtyStr}\\b`).test(transcript)) {
     return true;
+  }
+
+  // Spoken number words in Hindi and English
+  const spokenQtyMap: Record<number, string[]> = {
+    1: ['one', 'ek', 'single'],
+    2: ['two', 'do'],
+    3: ['three', 'teen'],
+    4: ['four', 'char', 'chaar'],
+    5: ['five', 'paanch', 'panch'],
+    6: ['six', 'chhe', 'che'],
+    7: ['seven', 'saat'],
+    8: ['eight', 'aath'],
+    9: ['nine', 'nau'],
+    10: ['ten', 'das'],
+    12: ['twelve', 'barah', 'bara'],
+    15: ['fifteen', 'pandrah'],
+    16: ['sixteen', 'solah'],
+    20: ['twenty', 'bees'],
+    25: ['twenty five', 'pachis'],
+    50: ['fifty', 'pachaas', 'pachas'],
+    75: ['seventy five', 'pachhattar'],
+    100: ['hundred', 'sau', 'ek sau', 'one hundred'],
+    200: ['two hundred', 'do sau'],
+    500: ['five hundred', 'paansau'],
+    1000: ['thousand', 'hazaar'],
+  };
+
+  const words = spokenQtyMap[Math.round(targetQuantity)] || [];
+  for (const w of words) {
+    if (new RegExp(`\\b${w}\\b`, 'i').test(transcript)) {
+      return true;
+    }
+  }
+
+  // Also check if any generic quantity pattern matches transcript (e.g. "X shares", "X lots", "X quantities")
+  const sharesMatches = Array.from(transcript.matchAll(/\b(\d+)\s*(?:shares?|lots?|qty|quantities|nag|hisse|piece|share)\b/gi));
+  for (const m of sharesMatches) {
+    const parsedQty = parseInt(m[1], 10);
+    if (parsedQty > 0 && (Math.abs(parsedQty - targetQuantity) / targetQuantity <= 0.10 || Math.abs(parsedQty - targetQuantity) <= 1)) {
+      return true;
+    }
   }
 
   return false;

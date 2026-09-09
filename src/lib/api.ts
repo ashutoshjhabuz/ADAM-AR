@@ -14,17 +14,33 @@ import type {
 } from '../types';
 
 export const AUTH_TOKEN_KEY = 'auditeq_auth_token';
+export const ACTIVE_DB_KEY = 'auditeq_active_db';
 
 export function getStoredToken(): string | null {
-  return localStorage.getItem(AUTH_TOKEN_KEY);
+  return (
+    localStorage.getItem(AUTH_TOKEN_KEY) ||
+    localStorage.getItem('token') ||
+    localStorage.getItem('auditeq_session_token')
+  );
 }
 
 export function setStoredToken(token: string) {
   localStorage.setItem(AUTH_TOKEN_KEY, token);
+  localStorage.setItem('token', token);
 }
 
 export function clearStoredToken() {
   localStorage.removeItem(AUTH_TOKEN_KEY);
+  localStorage.removeItem('token');
+  localStorage.removeItem('auditeq_session_token');
+}
+
+export function getStoredDatabase(): string | null {
+  return localStorage.getItem(ACTIVE_DB_KEY);
+}
+
+export function setStoredDatabase(dbName: string) {
+  localStorage.setItem(ACTIVE_DB_KEY, dbName);
 }
 
 export async function apiRequest<T = any>(
@@ -32,11 +48,16 @@ export async function apiRequest<T = any>(
   options: RequestInit = {}
 ): Promise<T> {
   const token = getStoredToken();
+  const activeDb = getStoredDatabase();
   const headers = new Headers(options.headers || {});
 
   if (token) {
     headers.set('Authorization', `Bearer ${token}`);
     headers.set('X-AuditEQ-Token', token);
+  }
+
+  if (activeDb) {
+    headers.set('X-AuditEQ-Database', activeDb);
   }
 
   const response = await fetch(endpoint, {
@@ -131,6 +152,11 @@ export const api = {
       body: formData,
     });
   },
+  combineSplitTrades: () =>
+    apiRequest<{ ok: boolean; combined_groups: number; merged_rows: number; message: string }>(
+      '/api/trades/combine-splits',
+      { method: 'POST' }
+    ),
   forceAudit: (callId: number) =>
     apiRequest<{ ok: boolean; audit: AuditRecord; scorecard: ScorecardRecord }>(`/api/calls/${callId}/force-audit`, {
       method: 'POST',
@@ -217,6 +243,7 @@ export const api = {
     subject?: string;
     to?: string;
     cc?: string;
+    marker_filter?: string;
   }) =>
     apiRequest<{ ok: boolean; sent_count: number; recipient: string; subject: string; message: string }>('/api/scorecards/bulk-send', {
       method: 'POST',
@@ -297,4 +324,39 @@ export const api = {
     const token = getStoredToken();
     return `/api/admin/cleared-backups/${id}/download?token=${encodeURIComponent(token || '')}`;
   },
+
+  // Databases (Multi-User Database Management)
+  getDatabases: () =>
+    apiRequest<{ ok: boolean; databases: any[]; current_database: string }>('/api/databases'),
+  createDatabase: (data: { name: string; display_name?: string }) =>
+    apiRequest<{ ok: boolean; database: string; message: string }>('/api/databases', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    }),
+  switchDatabase: (database: string) =>
+    apiRequest<{ ok: boolean; active_database: string; message: string }>('/api/databases/switch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ database }),
+    }),
+
+  // Manual Trade Audit (Missing Call / Mail Confirmation)
+  getMissingCallTrades: () =>
+    apiRequest<{ ok: boolean; missing_trades: any[] }>('/api/trades/missing-calls'),
+  manualAuditTrade: (tradeId: number, data: any) =>
+    apiRequest<{ ok: boolean; scorecard_id: number; audit_id: number; message: string }>(
+      `/api/trades/${tradeId}/manual-audit`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data),
+      }
+    ),
+  bulkManualAuditTrades: (audits: any[]) =>
+    apiRequest<{ ok: boolean; count: number; message: string }>('/api/trades/bulk-manual-audit', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ audits }),
+    }),
 };

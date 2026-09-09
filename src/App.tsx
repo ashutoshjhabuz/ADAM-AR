@@ -8,6 +8,7 @@ import { MatchingView } from './components/MatchingView';
 import { AuditView } from './components/AuditView';
 import { PipelineView } from './components/PipelineView';
 import { AuditedMasterView } from './components/AuditedMasterView';
+import { ManualTradeAuditView } from './components/ManualTradeAuditView';
 import { ScorecardsView } from './components/ScorecardsView';
 import { MailView } from './components/MailView';
 import { ReportsView } from './components/ReportsView';
@@ -305,6 +306,7 @@ export function App() {
     subject?: string;
     to?: string;
     cc?: string;
+    marker_filter?: string;
   }) => {
     const res = await api.bulkSendScorecards(options);
     await fetchAllData();
@@ -390,6 +392,10 @@ export function App() {
     master_table: {
       title: 'Audited Master Grid',
       subtitle: 'Complete pre-order audit master sheet with live inline editing, sorting, and manual record adjustments.',
+    },
+    manual_trade_audit: {
+      title: 'Missing Call Reconciliation & Mail Audit',
+      subtitle: 'Audit trades that lack phone recordings via client email/mail confirmation, update 5 parameters, and publish directly to scorecards.',
     },
     scorecards: {
       title: 'Official Quality Audit Scorecards',
@@ -563,6 +569,7 @@ export function App() {
               <TradesView
                 trades={trades}
                 onUploadTrades={handleUploadTrades}
+                onRefreshTrades={fetchAllData}
                 isLoading={isLoading}
               />
             )}
@@ -603,6 +610,13 @@ export function App() {
                 onRunAllAudits={handleRunAllAudits}
                 onRefresh={fetchAllData}
                 isLoading={isLoading}
+              />
+            )}
+
+            {activeTab === 'manual_trade_audit' && (
+              <ManualTradeAuditView
+                onScorecardCreated={fetchAllData}
+                onNavigateToScorecards={() => setActiveTab('scorecards')}
               />
             )}
 

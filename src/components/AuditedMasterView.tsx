@@ -29,6 +29,7 @@ import {
 import type { ScorecardRecord } from '../types';
 import { api, getStoredToken } from '../lib/api';
 import { TranscriptHighlighter } from './TranscriptHighlighter';
+import { ManualTradeAuditView } from './ManualTradeAuditView';
 
 interface AuditedMasterViewProps {
   scorecards: ScorecardRecord[];
@@ -1112,6 +1113,11 @@ export const AuditedMasterView: React.FC<AuditedMasterViewProps> = ({
             </button>
           </div>
         </div>
+      </div>
+
+      {/* Manual Audit for Trades Missing Recorded Calls (e.g. Mail Confirmation) */}
+      <div className="pt-8 border-t-2 border-dashed border-neutral-300">
+        <ManualTradeAuditView onScorecardCreated={onRefresh} />
       </div>
 
       {/* Modal: Full Audit Evidence Detail */}

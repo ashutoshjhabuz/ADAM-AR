@@ -15,10 +15,17 @@ import {
   RefreshCw,
   Sparkles,
   Settings,
+  Tag,
+  RotateCcw,
 } from 'lucide-react';
 import emailjs from '@emailjs/browser';
 import type { ScorecardRecord, MailHistoryRecord } from '../types';
 import { api } from '../lib/api';
+import {
+  getAdvisorEmailRouting,
+  FUNDSINDIA_ADVISOR_DIRECTORY,
+  FATAL_CC_EMAIL,
+} from '../lib/fundsindia-directory';
 
 interface MailViewProps {
   scorecards: ScorecardRecord[];
@@ -31,6 +38,7 @@ interface MailViewProps {
     subject?: string;
     to?: string;
     cc?: string;
+    marker_filter?: string;
   }) => Promise<void>;
   isLoading: boolean;
 }
@@ -42,18 +50,24 @@ export const MailView: React.FC<MailViewProps> = ({
   onBulkSend,
   isLoading,
 }) => {
-  // Derive unique advisor list from scorecards if not supplied
+  // Derive unique advisor list from directory + scorecards
   const availableAdvisors = useMemo(() => {
-    const list = new Set<string>(advisors);
+    const list = new Set<string>();
+    // Add directory advisors first
+    FUNDSINDIA_ADVISOR_DIRECTORY.forEach((entry) => list.add(entry.advisor_name));
+    // Add from props
+    advisors.forEach((a) => a && list.add(a));
+    // Add from scorecards
     scorecards.forEach((s) => {
       if (s.caller_name && s.caller_name !== '—') list.add(s.caller_name);
     });
     return Array.from(list).filter(Boolean);
   }, [advisors, scorecards]);
 
-  const [selectedAdvisor, setSelectedAdvisor] = useState<string>(
-    availableAdvisors[0] || 'Rohit Sharma'
-  );
+  const [selectedAdvisor, setSelectedAdvisor] = useState<string>('ALL');
+
+  // Marker / Score Categorization Filter
+  const [markerFilter, setMarkerFilter] = useState<'all' | '0' | '4' | '5'>('all');
 
   // Date Range State
   const [fromDate, setFromDate] = useState<string>('');
@@ -61,7 +75,7 @@ export const MailView: React.FC<MailViewProps> = ({
 
   // Email Config State
   const [toEmail, setToEmail] = useState<string>('');
-  const [ccEmail, setCcEmail] = useState<string>('audit@fundsindia.com');
+  const [ccEmail, setCcEmail] = useState<string>('');
   const [customSubject, setCustomSubject] = useState<string>('');
   const [statusMsg, setStatusMsg] = useState<{ text: string; type: 'success' | 'error' } | null>(null);
   const [isSending, setIsSending] = useState(false);
@@ -79,47 +93,120 @@ export const MailView: React.FC<MailViewProps> = ({
   const [isSendingTest, setIsSendingTest] = useState(false);
   const [smtpResult, setSmtpResult] = useState<{ ok: boolean; message: string } | null>(null);
 
-  // Update default recipient when advisor changes
+  // Re-sync routing whenever advisor or marker filter changes
   useEffect(() => {
-    if (selectedAdvisor) {
-      const sanitized = selectedAdvisor.toLowerCase().replace(/[^a-z0-9]/g, '.');
-      setToEmail(`${sanitized}@fundsindia.com`);
+    if (selectedAdvisor === 'ALL') {
+      const isFatalAlone = markerFilter === '0';
+      setToEmail('Individual Advisor Mailboxes (Auto-routed via directory)');
+      setCcEmail(isFatalAlone ? `compliance@fundsindia.com, ${FATAL_CC_EMAIL}` : 'compliance@fundsindia.com');
+    } else if (selectedAdvisor) {
+      const isFatalAlone = markerFilter === '0';
+      const routing = getAdvisorEmailRouting({
+        advisorName: selectedAdvisor,
+        isFatalAlone,
+      });
+      setToEmail(routing.to);
+      setCcEmail(routing.cc);
     }
-  }, [selectedAdvisor]);
+  }, [selectedAdvisor, markerFilter]);
+
+  const handleResetRouting = () => {
+    if (selectedAdvisor === 'ALL') {
+      const isFatalAlone = markerFilter === '0';
+      setToEmail('Individual Advisor Mailboxes (Auto-routed via directory)');
+      setCcEmail(isFatalAlone ? `compliance@fundsindia.com, ${FATAL_CC_EMAIL}` : 'compliance@fundsindia.com');
+      setCustomSubject('');
+      setStatusMsg({ text: 'Email recipients reset to FundsIndia directory standards.', type: 'success' });
+    } else if (selectedAdvisor) {
+      const isFatalAlone = markerFilter === '0';
+      const routing = getAdvisorEmailRouting({
+        advisorName: selectedAdvisor,
+        isFatalAlone,
+      });
+      setToEmail(routing.to);
+      setCcEmail(routing.cc);
+      setCustomSubject('');
+      setStatusMsg({ text: 'Email recipients reset to FundsIndia directory standards.', type: 'success' });
+    }
+  };
+
+  const handleResetFilters = () => {
+    setSelectedAdvisor('ALL');
+    setMarkerFilter('all');
+    setFromDate('');
+    setToDate('');
+    setCustomSubject('');
+    setStatusMsg(null);
+  };
 
   // Compute Default Subject
   const defaultSubject = useMemo(() => {
     const datePart = fromDate || toDate ? ` · ${fromDate || 'Start'} to ${toDate || 'Present'}` : '';
-    return `Pre-Order Quality Audit Scorecards — ${selectedAdvisor || 'Advisor'}${datePart}`;
-  }, [selectedAdvisor, fromDate, toDate]);
+    let categoryPart = '';
+    if (markerFilter === '0') categoryPart = ' [FATALS ALONE]';
+    else if (markerFilter === '5') categoryPart = ' [5 MARKS - Full Compliance]';
+    else if (markerFilter === '4') categoryPart = ' [4 MARKS - Compliant]';
+
+    const advLabel = selectedAdvisor === 'ALL' ? 'All Advisors' : (selectedAdvisor || 'Advisor');
+    return `Pre-Order Quality Audit Scorecards${categoryPart} — ${advLabel}${datePart}`;
+  }, [selectedAdvisor, fromDate, toDate, markerFilter]);
 
   const currentSubject = customSubject || defaultSubject;
 
-  // Filtered Scorecards matching advisor + date range
+  // Filtered Scorecards matching advisor + date range + marker filter
   const matchedScorecards = useMemo(() => {
-    if (!selectedAdvisor) return [];
-
     return scorecards.filter((sc) => {
-      // Match advisor
-      const advisorMatch =
-        (sc.caller_name || '').toLowerCase() === selectedAdvisor.toLowerCase() ||
-        (sc.dealer || '').toLowerCase() === selectedAdvisor.toLowerCase();
-      if (!advisorMatch) return false;
+      // Match advisor (unless ALL)
+      if (selectedAdvisor && selectedAdvisor !== 'ALL') {
+        const advisorMatch =
+          (sc.caller_name || '').toLowerCase() === selectedAdvisor.toLowerCase() ||
+          (sc.dealer || '').toLowerCase() === selectedAdvisor.toLowerCase();
+        if (!advisorMatch) return false;
+      }
 
       // Match Date Range
       const itemDate = sc.trade_date || sc.call_date || (sc.created_at ? sc.created_at.slice(0, 10) : '');
       if (fromDate && itemDate && itemDate < fromDate) return false;
       if (toDate && itemDate && itemDate > toDate) return false;
 
+      // Match Marker Filter
+      const isFatal =
+        Boolean(sc.is_fatal) ||
+        sc.score === 0 ||
+        sc.q1_status === 'FAIL' ||
+        sc.q2_status === 'FAIL' ||
+        sc.q5_status === 'FAIL';
+
+      if (markerFilter === '0') {
+        if (!isFatal) return false;
+      } else if (markerFilter === '4') {
+        if (isFatal || sc.score !== 4) return false;
+      } else if (markerFilter === '5') {
+        if (isFatal || sc.score !== 5) return false;
+      }
+
       return true;
     });
-  }, [scorecards, selectedAdvisor, fromDate, toDate]);
+  }, [scorecards, selectedAdvisor, fromDate, toDate, markerFilter]);
+
+  // Unique advisors represented in the filtered result
+  const uniqueAdvisorsInFiltered = useMemo(() => {
+    const set = new Set<string>();
+    matchedScorecards.forEach((sc) => {
+      const name = sc.caller_name || sc.dealer;
+      if (name && name !== '—') set.add(name);
+    });
+    return Array.from(set);
+  }, [matchedScorecards]);
 
   // Summary Metrics for the selection
   const totalCount = matchedScorecards.length;
   const passCount = matchedScorecards.filter((s) => !s.is_fatal && s.score >= 4).length;
-  const fatalCount = matchedScorecards.filter((s) => s.is_fatal).length;
-  const avgScore = totalCount > 0 ? (matchedScorecards.reduce((acc, s) => acc + (s.score || 0), 0) / totalCount).toFixed(1) : '0';
+  const fatalCount = matchedScorecards.filter((s) => s.is_fatal || s.score === 0).length;
+  const avgScore =
+    totalCount > 0
+      ? (matchedScorecards.reduce((acc, s) => acc + (s.score || 0), 0) / totalCount).toFixed(1)
+      : '0';
 
   const handleQuickDatePreset = (preset: 'today' | '7days' | '30days' | 'all') => {
     const today = new Date().toISOString().slice(0, 10);
@@ -145,13 +232,14 @@ export const MailView: React.FC<MailViewProps> = ({
   const handleOneClickSend = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedAdvisor) {
-      setStatusMsg({ text: 'Please select an advisor first.', type: 'error' });
+      setStatusMsg({ text: 'Please select an advisor or choose "All Advisors".', type: 'error' });
       return;
     }
 
     if (totalCount === 0) {
+      const markerLabel = markerFilter === 'all' ? '' : ` with marker filter ${markerFilter}`;
       setStatusMsg({
-        text: `No scorecards found for ${selectedAdvisor} within the selected date range. Please adjust filters.`,
+        text: `No scorecards found${selectedAdvisor === 'ALL' ? '' : ` for ${selectedAdvisor}`}${markerLabel} within the selected date range. Please adjust filters.`,
         type: 'error',
       });
       return;
@@ -161,7 +249,7 @@ export const MailView: React.FC<MailViewProps> = ({
     setStatusMsg(null);
 
     try {
-      if (dispatchEngine === 'emailjs' && emailJsServiceId && emailJsTemplateId && emailJsPublicKey) {
+      if (selectedAdvisor !== 'ALL' && dispatchEngine === 'emailjs' && emailJsServiceId && emailJsTemplateId && emailJsPublicKey) {
         // Send via EmailJS
         const templateParams = {
           to_email: toEmail,
@@ -171,7 +259,7 @@ export const MailView: React.FC<MailViewProps> = ({
           scorecard_count: totalCount,
           average_score: avgScore,
           date_range: fromDate || toDate ? `${fromDate || 'Start'} to ${toDate || 'Present'}` : 'All dates',
-          summary_text: `Dispatched ${totalCount} scorecards (${passCount} passed, ${fatalCount} fatal flags).`,
+          summary_text: `Dispatched ${totalCount} scorecards (${passCount} passed, ${fatalCount} fatal flags). Marker Filter: ${markerFilter}`,
         };
 
         await emailjs.send(emailJsServiceId, emailJsTemplateId, templateParams, emailJsPublicKey);
@@ -187,12 +275,17 @@ export const MailView: React.FC<MailViewProps> = ({
           from_date: fromDate || undefined,
           to_date: toDate || undefined,
           subject: currentSubject,
-          to: toEmail || undefined,
-          cc: ccEmail || undefined,
+          to: selectedAdvisor === 'ALL' ? undefined : (toEmail || undefined),
+          cc: selectedAdvisor === 'ALL' ? undefined : (ccEmail || undefined),
+          marker_filter: markerFilter !== 'all' ? markerFilter : undefined,
         });
 
+        const targetDesc = selectedAdvisor === 'ALL'
+          ? `across ${uniqueAdvisorsInFiltered.length} advisor(s)`
+          : `for ${selectedAdvisor} to ${toEmail}`;
+
         setStatusMsg({
-          text: `Successfully dispatched ${totalCount} scorecard(s) for ${selectedAdvisor} to ${toEmail} (CC: ${ccEmail || 'None'})!`,
+          text: `Successfully dispatched ${totalCount} filtered scorecard(s) ${targetDesc}!`,
           type: 'success',
         });
       }
@@ -215,17 +308,17 @@ export const MailView: React.FC<MailViewProps> = ({
             <span className="p-1.5 rounded-lg bg-amber-400 text-black">
               <Mail className="w-4 h-4" />
             </span>
-            <span>One-Click Advisor Scorecard Dispatch</span>
+            <span>Advisor Scorecard Dispatch &amp; Categorization</span>
           </h2>
           <p className="text-xs text-neutral-500 mt-0.5">
-            Select an advisor, specify the audit date range, and dispatch official quality audit scorecards directly to their mailbox in 1 click.
+            Filter scorecards by advisor, date range, and marker score (0 / 4 / 5) with automatic FundsIndia directory routing.
           </p>
         </div>
 
         <div className="flex items-center gap-2">
           <span className="text-xs px-3 py-1 bg-amber-400/10 text-amber-900 font-bold rounded-lg border border-amber-400/30 flex items-center gap-1.5">
             <ShieldCheck className="w-3.5 h-3.5 text-amber-500" />
-            <span>Cross-Advisor Isolation Enforced</span>
+            <span>FundsIndia Routing Directory Enforced</span>
           </span>
         </div>
       </div>
@@ -236,45 +329,159 @@ export const MailView: React.FC<MailViewProps> = ({
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
             <div className="flex items-center gap-2 font-bold text-sm text-amber-400">
               <Sparkles className="w-4 h-4 text-amber-400" />
-              <span>Configure Batch Dispatch Parameters</span>
+              <span>Configure Batch Dispatch &amp; Categorization Parameters</span>
             </div>
             <div className="text-xs text-neutral-400 font-mono">
-              Audit Standard · AuditEQ v17.0
+              Audit Standard · FundsIndia SEBI Compliance v18.0
             </div>
           </div>
         </div>
 
         <form onSubmit={handleOneClickSend} className="p-6 space-y-6 text-xs">
-          {/* Row 1: Advisor & Date Range Filters */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            {/* Advisor Selector */}
-            <div className="space-y-1.5">
-              <label className="block font-bold text-neutral-800 text-xs flex items-center gap-1.5">
-                <User className="w-3.5 h-3.5 text-amber-500" />
-                <span>Select Advisor Name *</span>
-              </label>
+          {/* Row 1: Advisor Selector & Marker Filter Categorization */}
+          <div className="grid grid-cols-1 md:grid-cols-12 gap-4">
+            {/* Advisor Selector (col-span-6) */}
+            <div className="md:col-span-6 space-y-1.5">
+              <div className="flex items-center justify-between">
+                <label className="font-bold text-neutral-800 text-xs flex items-center gap-1.5">
+                  <User className="w-3.5 h-3.5 text-amber-500" />
+                  <span>Select Advisor Name *</span>
+                </label>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={handleResetFilters}
+                    className="text-[11px] text-neutral-600 hover:text-neutral-900 font-semibold flex items-center gap-1 cursor-pointer"
+                    title="Reset all filters to defaults"
+                  >
+                    <Filter className="w-3 h-3 text-neutral-400" />
+                    <span>Reset Filters</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleResetRouting}
+                    className="text-[11px] text-amber-700 hover:text-amber-800 font-semibold flex items-center gap-1 cursor-pointer"
+                    title="Reset To and CC from directory matrix"
+                  >
+                    <RotateCcw className="w-3 h-3" />
+                    <span>Sync Directory</span>
+                  </button>
+                </div>
+              </div>
               <select
                 value={selectedAdvisor}
                 onChange={(e) => setSelectedAdvisor(e.target.value)}
                 className="w-full px-3 py-2 bg-neutral-50 border border-neutral-300 rounded-lg text-xs font-semibold text-neutral-900 focus:outline-hidden focus:border-amber-400 focus:ring-1 focus:ring-amber-400"
               >
+                <option value="ALL">🌟 All Advisors ({scorecards.length} scorecards recorded)</option>
                 {availableAdvisors.length > 0 ? (
                   availableAdvisors.map((adv) => {
                     const advCount = scorecards.filter(
                       (s) => (s.caller_name || '').toLowerCase() === adv.toLowerCase()
                     ).length;
+                    const dirEntry = FUNDSINDIA_ADVISOR_DIRECTORY.find(
+                      (d) => d.advisor_name.toLowerCase() === adv.toLowerCase()
+                    );
+                    const dealerTag = dirEntry ? `[${dirEntry.dealer}] ` : '';
                     return (
                       <option key={adv} value={adv}>
-                        {adv} ({advCount} scorecards available)
+                        {dealerTag}{adv} ({advCount} scorecards available)
                       </option>
                     );
                   })
                 ) : (
-                  <option value="Rohit Sharma">Rohit Sharma (Default)</option>
+                  <option value="Ashutosh">Ashutosh (Default)</option>
                 )}
               </select>
             </div>
 
+            {/* Marker / Score Filter Categorization (col-span-6) */}
+            <div className="md:col-span-6 space-y-1.5">
+              <label className="font-bold text-neutral-800 text-xs flex items-center gap-1.5">
+                <Tag className="w-3.5 h-3.5 text-amber-500" />
+                <span>Scorecard Marker / Category Filter</span>
+              </label>
+              <div className="grid grid-cols-4 gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => setMarkerFilter('all')}
+                  className={`py-2 px-1.5 rounded-lg border text-center font-bold text-xs cursor-pointer transition-all ${
+                    markerFilter === 'all'
+                      ? 'bg-neutral-900 text-amber-400 border-neutral-900 shadow-xs'
+                      : 'bg-neutral-50 text-neutral-700 border-neutral-200 hover:bg-neutral-100'
+                  }`}
+                >
+                  All Markers
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setMarkerFilter('0')}
+                  className={`py-2 px-1.5 rounded-lg border text-center font-bold text-xs cursor-pointer transition-all ${
+                    markerFilter === '0'
+                      ? 'bg-rose-600 text-white border-rose-600 shadow-xs'
+                      : 'bg-rose-50 text-rose-700 border-rose-200 hover:bg-rose-100'
+                  }`}
+                  title="Filter scorecards with score 0 or fatal violations"
+                >
+                  0 Marks (Fatals)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setMarkerFilter('4')}
+                  className={`py-2 px-1.5 rounded-lg border text-center font-bold text-xs cursor-pointer transition-all ${
+                    markerFilter === '4'
+                      ? 'bg-blue-600 text-white border-blue-600 shadow-xs'
+                      : 'bg-blue-50 text-blue-700 border-blue-200 hover:bg-blue-100'
+                  }`}
+                  title="Filter scorecards with 4 marks (Partial Execution / Compliant)"
+                >
+                  4 Marks
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setMarkerFilter('5')}
+                  className={`py-2 px-1.5 rounded-lg border text-center font-bold text-xs cursor-pointer transition-all ${
+                    markerFilter === '5'
+                      ? 'bg-emerald-600 text-white border-emerald-600 shadow-xs'
+                      : 'bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100'
+                  }`}
+                  title="Filter scorecards with 5 marks (Perfect Pre-Order Compliance)"
+                >
+                  5 Marks
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* Sambath S Conditional Routing Notification Banner */}
+          {markerFilter === '0' ? (
+            <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-900 text-xs flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
+                <span>
+                  <strong>Fatal Filter Active (0 Marks):</strong> <code className="font-mono font-bold bg-rose-100 px-1 py-0.5 rounded text-rose-900">{FATAL_CC_EMAIL}</code> is <strong>included in CC</strong> per FundsIndia compliance policy.
+                </span>
+              </div>
+              <span className="text-[10px] font-bold uppercase tracking-wider bg-rose-200 text-rose-900 px-2 py-0.5 rounded">
+                Sambath S In CC
+              </span>
+            </div>
+          ) : (
+            <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-900 text-xs flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                <span>
+                  <strong>Standard Routing ({markerFilter === 'all' ? 'All Scorecards' : `${markerFilter} Marks`}):</strong> Standard supervisory manager CCs applied. <code className="font-mono text-neutral-600">{FATAL_CC_EMAIL}</code> is <strong>omitted</strong>.
+                </span>
+              </div>
+              <span className="text-[10px] font-bold uppercase tracking-wider bg-emerald-200 text-emerald-900 px-2 py-0.5 rounded">
+                Sambath S Excluded
+              </span>
+            </div>
+          )}
+
+          {/* Row 2: Date Range Filters */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-1">
             {/* From Date */}
             <div className="space-y-1.5">
               <label className="block font-bold text-neutral-800 text-xs flex items-center gap-1.5">
@@ -341,22 +548,27 @@ export const MailView: React.FC<MailViewProps> = ({
             </button>
           </div>
 
-          {/* Row 2: Target Email, CC, and Subject */}
+          {/* Row 3: Target Email, CC, and Subject */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2 border-t border-neutral-200">
             <div>
               <label className="block font-bold text-neutral-800 mb-1">
                 Advisor Email Address (To) *
               </label>
               <input
-                type="email"
+                type={selectedAdvisor === 'ALL' ? 'text' : 'email'}
                 value={toEmail}
                 onChange={(e) => setToEmail(e.target.value)}
+                disabled={selectedAdvisor === 'ALL'}
                 placeholder="advisor@fundsindia.com"
-                className="w-full px-3 py-2 bg-neutral-50 border border-neutral-300 rounded-lg text-xs font-mono text-neutral-900 focus:outline-hidden focus:border-amber-400"
+                className={`w-full px-3 py-2 border border-neutral-300 rounded-lg text-xs font-mono text-neutral-900 focus:outline-hidden focus:border-amber-400 ${
+                  selectedAdvisor === 'ALL' ? 'bg-neutral-100 text-neutral-600 cursor-not-allowed' : 'bg-neutral-50'
+                }`}
                 required
               />
               <span className="text-[11px] text-neutral-500 mt-0.5 block">
-                Target recipient mailbox for {selectedAdvisor}.
+                {selectedAdvisor === 'ALL'
+                  ? 'Auto-routes each scorecard to its respective advisor email address from the FundsIndia directory.'
+                  : `Target recipient mailbox for ${selectedAdvisor}.`}
               </span>
             </div>
 
@@ -372,7 +584,7 @@ export const MailView: React.FC<MailViewProps> = ({
                 className="w-full px-3 py-2 bg-neutral-50 border border-neutral-300 rounded-lg text-xs font-mono text-neutral-900 focus:outline-hidden focus:border-amber-400"
               />
               <span className="text-[11px] text-neutral-500 mt-0.5 block">
-                Compliance officer or supervisory desk email.
+                Official supervisory managers from FundsIndia directory.
               </span>
             </div>
 
@@ -474,7 +686,7 @@ export const MailView: React.FC<MailViewProps> = ({
                 <span>Selected Scorecards Batch Overview</span>
               </h4>
               <div className="text-xs font-mono font-bold text-neutral-900">
-                {totalCount} Call Scorecards Selected
+                {totalCount} Call Scorecard(s) Matching Criteria
               </div>
             </div>
 
@@ -484,9 +696,9 @@ export const MailView: React.FC<MailViewProps> = ({
                 <div className="font-bold text-neutral-900 truncate mt-0.5">{selectedAdvisor || '—'}</div>
               </div>
               <div className="bg-white p-3 rounded-xl border border-neutral-200 shadow-2xs">
-                <div className="text-[11px] text-neutral-500 font-medium">Date Scope</div>
+                <div className="text-[11px] text-neutral-500 font-medium">Date Scope &amp; Marker</div>
                 <div className="font-bold text-neutral-900 mt-0.5">
-                  {fromDate || toDate ? `${fromDate || '—'} → ${toDate || '—'}` : 'All Dates'}
+                  {markerFilter === 'all' ? 'All' : `${markerFilter} Marks`} · {fromDate || toDate ? `${fromDate || '—'} → ${toDate || '—'}` : 'All Dates'}
                 </div>
               </div>
               <div className="bg-white p-3 rounded-xl border border-emerald-200 bg-emerald-50/50 shadow-2xs">
@@ -501,21 +713,30 @@ export const MailView: React.FC<MailViewProps> = ({
 
             {/* List of included calls preview */}
             {matchedScorecards.length > 0 ? (
-              <div className="max-h-40 overflow-y-auto border border-neutral-200 rounded-lg bg-white divide-y divide-neutral-100 text-[11px]">
+              <div className="max-h-48 overflow-y-auto border border-neutral-200 rounded-lg bg-white divide-y divide-neutral-100 text-[11px]">
                 {matchedScorecards.map((sc) => (
-                  <div key={sc.id} className="p-2 flex items-center justify-between hover:bg-neutral-50">
+                  <div key={sc.id} className="p-2.5 flex items-center justify-between hover:bg-neutral-50">
                     <div className="flex items-center gap-2">
                       <span className="font-mono font-bold text-amber-600">#{sc.id}</span>
                       <span className="font-semibold text-neutral-900">{sc.client}</span>
                       <span className="text-neutral-500">· {sc.trade_date || sc.call_date || 'Today'}</span>
+                      {sc.dealer && (
+                        <span className="text-[10px] font-mono text-neutral-400 bg-neutral-100 px-1.5 py-0.2 rounded">
+                          {sc.dealer}
+                        </span>
+                      )}
                     </div>
                     <div className="flex items-center gap-2 font-mono">
-                      {sc.is_fatal ? (
+                      {sc.is_fatal || sc.score === 0 ? (
                         <span className="text-rose-700 font-bold bg-rose-50 px-2 py-0.5 rounded border border-rose-200 text-[10px]">
                           FATAL (0/5)
                         </span>
-                      ) : (
+                      ) : sc.score === 5 ? (
                         <span className="text-emerald-700 font-bold bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200 text-[10px]">
+                          5/5 MARKS (PERFECT)
+                        </span>
+                      ) : (
+                        <span className="text-blue-700 font-bold bg-blue-50 px-2 py-0.5 rounded border border-blue-200 text-[10px]">
                           {sc.score}/5 MARKS
                         </span>
                       )}
@@ -525,7 +746,9 @@ export const MailView: React.FC<MailViewProps> = ({
               </div>
             ) : (
               <div className="p-4 text-center text-neutral-400 bg-white rounded-lg border border-neutral-200">
-                No scorecards found for this advisor in the specified date range.
+                {selectedAdvisor === 'ALL'
+                  ? `No scorecards found across all advisors with the current filter settings (${markerFilter === 'all' ? 'All Markers' : `Marker ${markerFilter}`}).`
+                  : `No scorecards found for ${selectedAdvisor} with the current filter settings (${markerFilter === 'all' ? 'All Markers' : `Marker ${markerFilter}`}).`}
               </div>
             )}
           </div>
@@ -545,7 +768,9 @@ export const MailView: React.FC<MailViewProps> = ({
               <span>
                 {isSending
                   ? 'Dispatching Scorecards…'
-                  : `⚡ 1-Click Send ${totalCount} Scorecard(s) to ${selectedAdvisor}`}
+                  : selectedAdvisor === 'ALL'
+                  ? `⚡ Send All Filtered Mails (${totalCount} Scorecards across ${uniqueAdvisorsInFiltered.length} Advisors${markerFilter !== 'all' ? ` · ${markerFilter} Marks` : ''})`
+                  : `⚡ Send All Filtered Mails (${totalCount} Scorecards to ${selectedAdvisor}${markerFilter !== 'all' ? ` · ${markerFilter} Marks` : ''})`}
               </span>
             </button>
           </div>

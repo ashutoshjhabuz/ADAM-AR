@@ -168,11 +168,9 @@ export function findAdvisorEntry(dealer?: string | null, advisorName?: string | 
     const cleaned = cleanName(advisorName);
     if (!cleaned) return null;
 
-    // Exact match
     let found = FUNDSINDIA_ADVISOR_DIRECTORY.find((a) => cleanName(a.advisor_name) === cleaned);
     if (found) return found;
 
-    // Partial / prefix match
     found = FUNDSINDIA_ADVISOR_DIRECTORY.find(
       (a) => cleanName(a.advisor_name).includes(cleaned) || cleaned.includes(cleanName(a.advisor_name))
     );
@@ -182,43 +180,25 @@ export function findAdvisorEntry(dealer?: string | null, advisorName?: string | 
   return null;
 }
 
-export function resolveEmailRouting(options: {
-  dealer?: string | null;
+export function getAdvisorEmailRouting(options: {
   advisorName?: string | null;
+  dealer?: string | null;
   isFatalAlone?: boolean;
-  isFatal?: boolean;
-  overrideTo?: string | null;
-  overrideCc?: string | null;
-}): { to: string; cc: string; from: string } {
-  const { dealer, advisorName, overrideTo, overrideCc } = options;
-  // Sambath S rule: ONLY include sambath.s@fundsindia.com when sending fatal scorecards alone!
-  // "no need sambath.s@fundsindia.com while sending 5 marks and 4 marks also when i send all scorecard"
-  // "keep sambath.s@fundsindia.com only when i will send only fatals scorecards"
-  const isFatalAlone = options.isFatalAlone !== undefined ? options.isFatalAlone : Boolean(options.isFatal);
-
+}): { to: string; cc: string } {
+  const { advisorName, dealer, isFatalAlone } = options;
   const entry = findAdvisorEntry(dealer, advisorName);
-  let to = overrideTo?.trim() || entry?.to_email || '';
 
+  let to = entry?.to_email || '';
   if (!to && advisorName) {
     to = `${advisorName.toLowerCase().replace(/[^a-z0-9]/g, '.')}@fundsindia.com`;
-  } else if (!to) {
-    to = 'compliance@fundsindia.com';
   }
 
   const ccSet = new Set<string>();
-
-  // If override CC provided, add them
-  if (overrideCc && overrideCc.trim()) {
-    overrideCc
-      .split(/[,;]/)
-      .map((e) => e.trim().toLowerCase())
-      .filter(Boolean)
-      .forEach((e) => ccSet.add(e));
-  } else if (entry && entry.cc_emails.length > 0) {
+  if (entry && entry.cc_emails.length > 0) {
     entry.cc_emails.forEach((e) => ccSet.add(e.trim().toLowerCase()));
   }
 
-  // Handle FATAL-ALONE conditional CC rule:
+  // Sambath S rule: only include sambath.s@fundsindia.com when sending only fatals!
   if (isFatalAlone) {
     ccSet.add(FATAL_CC_EMAIL.toLowerCase());
   } else {
@@ -228,6 +208,5 @@ export function resolveEmailRouting(options: {
   return {
     to,
     cc: Array.from(ccSet).join(', '),
-    from: DEFAULT_SENDER_EMAIL,
   };
 }

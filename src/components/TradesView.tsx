@@ -1,16 +1,19 @@
 import React, { useState } from 'react';
 import { Upload, TrendingUp, Search, FileSpreadsheet, CheckCircle2, ShieldCheck } from 'lucide-react';
 import type { TradeRecord } from '../types';
+import { api } from '../lib/api';
 
 interface TradesViewProps {
   trades: TradeRecord[];
   onUploadTrades: (file: File) => Promise<void>;
+  onRefreshTrades?: () => Promise<void>;
   isLoading: boolean;
 }
 
 export const TradesView: React.FC<TradesViewProps> = ({
   trades,
   onUploadTrades,
+  onRefreshTrades,
   isLoading,
 }) => {
   const [search, setSearch] = useState('');
@@ -68,25 +71,52 @@ export const TradesView: React.FC<TradesViewProps> = ({
           </span>
         </div>
 
-        <form onSubmit={handleUploadSubmit} className="flex flex-col sm:flex-row items-center gap-3">
-          <div className="relative flex-1 w-full">
-            <input
-              type="file"
-              accept=".csv,.xlsx,.txt"
-              onChange={(e) => setTradeFile(e.target.files?.[0] || null)}
-              className="block w-full text-xs text-neutral-500 file:mr-3 file:py-2 file:px-4 file:rounded-xl file:border-0 file:text-xs file:font-bold file:bg-black file:text-amber-400 hover:file:bg-neutral-800 cursor-pointer border border-neutral-300 rounded-xl p-1 bg-neutral-50"
-            />
-          </div>
+        <div className="flex flex-col sm:flex-row items-center justify-between gap-3">
+          <form onSubmit={handleUploadSubmit} className="flex flex-col sm:flex-row items-center gap-3 flex-1 w-full">
+            <div className="relative flex-1 w-full">
+              <input
+                type="file"
+                accept=".csv,.xlsx,.txt"
+                onChange={(e) => setTradeFile(e.target.files?.[0] || null)}
+                className="block w-full text-xs text-neutral-500 file:mr-3 file:py-2 file:px-4 file:rounded-xl file:border-0 file:text-xs file:font-bold file:bg-black file:text-amber-400 hover:file:bg-neutral-800 cursor-pointer border border-neutral-300 rounded-xl p-1 bg-neutral-50"
+              />
+            </div>
+
+            <button
+              type="submit"
+              disabled={isUploading || !tradeFile}
+              className="w-full sm:w-auto px-6 py-2.5 bg-black hover:bg-neutral-900 disabled:opacity-50 text-amber-400 font-bold rounded-xl text-xs shadow-md transition-transform active:scale-95 cursor-pointer flex items-center justify-center gap-2 border border-amber-400/30 shrink-0"
+            >
+              <Upload className="w-3.5 h-3.5 text-amber-400" />
+              <span>{isUploading ? 'Importing Trades…' : 'Import Trades'}</span>
+            </button>
+          </form>
 
           <button
-            type="submit"
-            disabled={isUploading || !tradeFile}
-            className="w-full sm:w-auto px-6 py-2.5 bg-black hover:bg-neutral-900 disabled:opacity-50 text-amber-400 font-bold rounded-xl text-xs shadow-md transition-transform active:scale-95 cursor-pointer flex items-center justify-center gap-2 border border-amber-400/30 shrink-0"
+            type="button"
+            onClick={async () => {
+              try {
+                setUploadStatus('Consolidating split market executions at CMP…');
+                const data = await api.combineSplitTrades();
+                if (data.ok) {
+                  setUploadStatus(data.message);
+                  if (onRefreshTrades) {
+                    await onRefreshTrades();
+                  }
+                } else {
+                  setUploadStatus(`Consolidation status: ${data.message || 'Complete'}`);
+                }
+              } catch (err: any) {
+                setUploadStatus(`Consolidation error: ${err.message}`);
+              }
+            }}
+            className="w-full sm:w-auto px-4 py-2.5 bg-neutral-100 hover:bg-neutral-200 text-neutral-800 font-bold rounded-xl text-xs transition-colors cursor-pointer flex items-center justify-center gap-2 border border-neutral-300 shrink-0"
+            title="Consolidates multiple partial market fills for the same client into a single order at CMP"
           >
-            <Upload className="w-3.5 h-3.5 text-amber-400" />
-            <span>{isUploading ? 'Importing Trades…' : 'Import Trades'}</span>
+            <TrendingUp className="w-3.5 h-3.5 text-amber-600" />
+            <span>Consolidate CMP Splits</span>
           </button>
-        </form>
+        </div>
 
         {uploadStatus && (
           <div className="mt-3 text-xs font-medium text-neutral-800 bg-amber-50 p-2.5 rounded-lg border border-amber-200">
@@ -170,9 +200,27 @@ export const TradesView: React.FC<TradesViewProps> = ({
                         {t.side || 'BUY'}
                       </span>
                     </td>
-                    <td className="py-2.5 px-3 text-right font-mono font-bold">{t.quantity !== undefined && t.quantity !== null ? t.quantity.toLocaleString() : '—'}</td>
-                    <td className="py-2.5 px-3 text-right font-mono font-bold text-amber-600">
-                      {t.price !== undefined && t.price !== null ? `₹${t.price.toFixed(2)}` : '—'}
+                    <td className="py-2.5 px-3 text-right font-mono font-bold">
+                      <div className="flex flex-col items-end">
+                        <span>{t.quantity !== undefined && t.quantity !== null ? t.quantity.toLocaleString() : '—'}</span>
+                        {Boolean(t.is_combined) && (
+                          <span className="text-[10px] font-sans font-semibold text-amber-600 bg-amber-50 border border-amber-200 px-1 py-0.2 rounded mt-0.5" title={t.notes || ''}>
+                            Combined ({t.split_count || 2} fills)
+                          </span>
+                        )}
+                      </div>
+                    </td>
+                    <td className="py-2.5 px-3 text-right font-mono font-bold">
+                      <div className="flex flex-col items-end">
+                        <span className={t.price_display === 'CMP' ? 'text-blue-700 bg-blue-50 px-1.5 py-0.5 rounded border border-blue-200 text-xs' : 'text-amber-600'}>
+                          {t.price_display === 'CMP' ? 'CMP' : (t.price !== undefined && t.price !== null ? `₹${t.price.toFixed(2)}` : '—')}
+                        </span>
+                        {t.price_display === 'CMP' && t.price ? (
+                          <span className="text-[10px] text-neutral-400 font-normal mt-0.5">
+                            Avg: ₹{t.price.toFixed(2)}
+                          </span>
+                        ) : null}
+                      </div>
                     </td>
                   </tr>
                 ))
