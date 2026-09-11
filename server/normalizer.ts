@@ -102,7 +102,7 @@ export const SYMBOL_ALIASES: Record<string, string[]> = {
   IKS: ['iks', 'i k s', 'i.k.s.', 'ics', 'iks health', 'iks healthcare', 'iks technologies', 'iks-eq'],
   IKSL: ['iks', 'i k s', 'i.k.s.', 'ics', 'iks health', 'iks healthcare', 'iks technologies', 'iks-eq'],
   SUZLON: ['suzlon', 'suzlon energy'],
-  YESBANK: ['yes bank', 'yesbank', 'yes'],
+  YESBANK: ['yes bank', 'yesbank'],
   IDFCFIRSTB: ['idfc first', 'idfc first bank', 'idfc', 'idfc bank'],
   FEDERALBNK: ['federal bank', 'federalbank', 'federal'],
   ANGELONE: ['angel one', 'angelone', 'angel broking'],
@@ -498,9 +498,11 @@ export function matchClientCodeInTranscript(
 
   const lowerTranscript = transcript.toLowerCase();
   const squashedTranscript = transcript.toUpperCase().replace(/[^A-Z0-9]/g, '');
+  const spokenNormalizedTranscript = normalizeSpokenNumbers(transcript);
+  const squashedSpokenTranscript = spokenNormalizedTranscript.toUpperCase().replace(/[^A-Z0-9]/g, '');
 
-  // 1. Direct normalized substring check
-  if (squashedTranscript.includes(normCode)) {
+  // 1. Direct normalized substring check (raw and spoken-normalized)
+  if (squashedTranscript.includes(normCode) || squashedSpokenTranscript.includes(normCode)) {
     return { matched: true, score: 0.35, matchedVariant: normCode };
   }
 
@@ -508,56 +510,59 @@ export function matchClientCodeInTranscript(
   // e.g. W-I-A-2-6-7-7-9 or W I A 2 6 7 7 9 or W.I.A. 26779
   const pattern = normCode.split('').join('[\\s\\-_.]*');
   const regex = new RegExp(`\\b${pattern}\\b`, 'i');
-  if (regex.test(transcript)) {
+  if (regex.test(transcript) || regex.test(spokenNormalizedTranscript)) {
     return { matched: true, score: 0.35, matchedVariant: normCode };
   }
 
   // 3. Phonetic letter variations:
-  // Whisper often transcribes 'WIA' as 'VIA', 'V.I.A.', 'V I A', 'DOUBLE U I A', 'W I A', 'W-I-A', 'WAS', 'WAA'
+  // Whisper often transcribes 'WIA' as 'VIA', 'V.I.A.', 'V I A', 'DOUBLE U I A', 'W I A', 'W-I-A', 'WAS', 'WAA', 'WYA'
   const numericSuffix = normCode.replace(/^[A-Z]+/i, '');
-  if (numericSuffix && numericSuffix.length >= 3) {
+  if (numericSuffix && numericSuffix.length >= 2) {
     const phoneticPatterns = [
       `v[\\s\\-_.]*i[\\s\\-_.]*a[\\s\\-_.]*${numericSuffix}`,
       `w[\\s\\-_.]*i[\\s\\-_.]*a[\\s\\-_.]*${numericSuffix}`,
       `w[\\s\\-_.]*a[\\s\\-_.]*a[\\s\\-_.]*${numericSuffix}`,
       `w[\\s\\-_.]*a[\\s\\-_.]*s[\\s\\-_.]*${numericSuffix}`,
       `v[\\s\\-_.]*a[\\s\\-_.]*a[\\s\\-_.]*${numericSuffix}`,
+      `v[\\s\\-_.]*a[\\s\\-_.]*s[\\s\\-_.]*${numericSuffix}`,
+      `w[\\s\\-_.]*y[\\s\\-_.]*a[\\s\\-_.]*${numericSuffix}`,
+      `v[\\s\\-_.]*y[\\s\\-_.]*a[\\s\\-_.]*${numericSuffix}`,
       `double\\s*u\\s*i\\s*a\\s*${numericSuffix}`,
+      `double\\s*u\\s*a\\s*a\\s*${numericSuffix}`,
+      `double\\s*u\\s*a\\s*s\\s*${numericSuffix}`,
       `dhablu\\s*i\\s*a\\s*${numericSuffix}`,
       `w1a\\s*${numericSuffix}`,
     ];
     for (const pp of phoneticPatterns) {
-      if (new RegExp(`\\b${pp}\\b`, 'i').test(lowerTranscript)) {
+      if (new RegExp(`\\b${pp}\\b`, 'i').test(lowerTranscript) || new RegExp(`\\b${pp}\\b`, 'i').test(spokenNormalizedTranscript.toLowerCase())) {
         return { matched: true, score: 0.35, matchedVariant: normCode };
       }
     }
   }
 
   // 4. Numeric Code Matching (SEBI Audio Audit standard):
-  // When clients or advisors confirm identity, they routinely state the numeric code (e.g. "26779" for WIA26779, or "81138" for WIA81138, or "9767").
-  const numericPartMatch = normCode.match(/\d{4,8}/);
+  // When clients or advisors confirm identity, they routinely state the numeric code (e.g. "26779" for WIA26779, or "81138" for WIA81138, or "9767", or "123").
+  const numericPartMatch = normCode.match(/\d{2,8}/);
   if (numericPartMatch) {
     const numPart = numericPartMatch[0];
 
     // a) Direct numeric boundary or spaced match in transcript
     const numSpacedPat = numPart.split('').join('[\\s\\-_.]*');
-    if (new RegExp(`\\b${numSpacedPat}\\b`, 'i').test(transcript) || squashedTranscript.includes(numPart)) {
+    if (new RegExp(`\\b${numSpacedPat}\\b`, 'i').test(transcript) || squashedTranscript.includes(numPart) || squashedSpokenTranscript.includes(numPart)) {
       return { matched: true, score: 0.35, matchedVariant: numPart };
     }
 
     // b) Check spoken digit sequences (e.g. "two six seven seven nine" or "nine seven six seven")
-    const spokenNormalizedTranscript = normalizeSpokenNumbers(transcript);
     if (spokenNormalizedTranscript.includes(numPart) || spokenNormalizedTranscript.replace(/\D/g, '').includes(numPart)) {
       return { matched: true, score: 0.35, matchedVariant: numPart };
     }
   }
 
-  // 5. 90% Fuzzy Matching on candidate tokens and sliding word windows
-  // e.g. WAS 9767 vs WAA9767 (similarity >= 0.80)
-  const candidateMatches = transcript.match(/\b[A-Za-z0-9\s\-._]{4,14}\b/g) || [];
+  // 5. 90% Fuzzy Matching on candidate tokens and sliding word windows (e.g. WAS 9767 vs WAA9767)
+  const candidateMatches = transcript.match(/\b[A-Za-z0-9\s\-._]{3,14}\b/g) || [];
   for (const rawCand of candidateMatches) {
     const candNorm = normalizeClientCode(rawCand);
-    if (!candNorm || candNorm.length < 4) continue;
+    if (!candNorm || candNorm.length < 3) continue;
 
     // Direct similarity check
     const sim = fuzzySimilarity(candNorm, normCode);
@@ -570,22 +575,35 @@ export function matchClientCodeInTranscript(
     const codeNum = normCode.replace(/\D/g, '');
     const candPrefix = candNorm.replace(/\d/g, '');
     const codePrefix = normCode.replace(/\d/g, '');
-    if (candNum && codeNum && candNum === codeNum && candNum.length >= 3 && levenshteinDistance(candPrefix, codePrefix) <= 1) {
+    if (candNum && codeNum && candNum === codeNum && candNum.length >= 2 && levenshteinDistance(candPrefix, codePrefix) <= 1) {
       return { matched: true, score: 0.35, matchedVariant: normCode };
     }
   }
 
-  // Check 1 to 4 word sliding windows against normCode
-  const words = transcript.replace(/[^a-zA-Z0-9\s]/g, ' ').split(/\s+/).filter(Boolean);
-  for (let len = 1; len <= 4; len++) {
-    for (let i = 0; i <= words.length - len; i++) {
-      const phrase = words.slice(i, i + len).join('').toUpperCase();
-      if (phrase.length >= 4) {
-        if (fuzzySimilarity(phrase, normCode) >= 0.80) {
-          return { matched: true, score: 0.35, matchedVariant: normCode };
-        }
-        if (numericPartMatch && phrase.includes(numericPartMatch[0])) {
-          return { matched: true, score: 0.35, matchedVariant: normCode };
+  // Check 1 to 5 word sliding windows across raw transcript and spoken normalized transcript
+  const allWordSources = [
+    transcript.replace(/[^a-zA-Z0-9\s]/g, ' ').split(/\s+/).filter(Boolean),
+    spokenNormalizedTranscript.replace(/[^a-zA-Z0-9\s]/g, ' ').split(/\s+/).filter(Boolean),
+  ];
+
+  for (const words of allWordSources) {
+    for (let len = 1; len <= Math.min(5, words.length); len++) {
+      for (let i = 0; i <= words.length - len; i++) {
+        const phrase = words.slice(i, i + len).join('').toUpperCase();
+        if (phrase.length >= 3) {
+          if (fuzzySimilarity(phrase, normCode) >= 0.80) {
+            return { matched: true, score: 0.35, matchedVariant: normCode };
+          }
+          const candNum = phrase.replace(/\D/g, '');
+          const codeNum = normCode.replace(/\D/g, '');
+          const candPrefix = phrase.replace(/\d/g, '');
+          const codePrefix = normCode.replace(/\d/g, '');
+          if (candNum && codeNum && candNum === codeNum && candNum.length >= 2 && levenshteinDistance(candPrefix, codePrefix) <= 1) {
+            return { matched: true, score: 0.35, matchedVariant: normCode };
+          }
+          if (numericPartMatch && phrase.includes(numericPartMatch[0])) {
+            return { matched: true, score: 0.35, matchedVariant: normCode };
+          }
         }
       }
     }
@@ -1157,7 +1175,10 @@ export function matchQuantityInTranscript(targetQuantity: number, transcript: st
   }
 
   const tokens = extractNumericTokens(transcript);
-  for (const token of tokens) {
+  const spokenNormalizedTranscript = normalizeSpokenNumbers(transcript);
+  const allTokens = Array.from(new Set([...tokens, ...extractNumericTokens(spokenNormalizedTranscript)]));
+
+  for (const token of allTokens) {
     if (Math.abs(token - targetQuantity) < 0.01) {
       return true;
     }

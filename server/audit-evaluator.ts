@@ -311,10 +311,10 @@ export function evaluateEvidenceCompliance(
       stockSpokenDetail = otherStock ? `Spoken: "${otherStock}" (Expected: "${resolvedTrade.symbol}")` : `Not spoken (Expected: "${resolvedTrade.symbol}")`;
     }
   } else {
-    const lowerT = transcript.toLowerCase();
     for (const [symKey, aliases] of Object.entries(SYMBOL_ALIASES)) {
       for (const alias of aliases) {
-        if (lowerT.includes(alias.toLowerCase())) {
+        const aliasRegex = new RegExp(`\\b${alias.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&')}\\b`, 'i');
+        if (aliasRegex.test(transcript)) {
           stockMatches = true;
           stockSpokenDetail = symKey;
           break;

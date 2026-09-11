@@ -58,27 +58,29 @@ const SCRAP_VOICEMAIL_PATTERNS = [
 
 /**
  * Stage 1: SCRAP Detection (Executed strictly BEFORE any other classification)
+ * User Mandate: "all calls below 6 seconds are scrab, 7 seconds call are not scrab"
  */
 export function detectScrapCall(
   transcript?: string | null,
   durationSeconds?: number
 ): PreOrderClassificationResult | null {
-  // Check 1: Duration <= 8 seconds is definitely a SCRAP call per regulatory specification
-  if (durationSeconds !== undefined && durationSeconds > 0 && durationSeconds <= 8) {
+  // Check 1: Duration <= 6 seconds is definitely a SCRAP call per regulatory specification
+  // All calls <= 6s duration are SCRAP. Calls >= 7s duration are NOT SCRAP by duration alone.
+  if (durationSeconds !== undefined && durationSeconds > 0 && durationSeconds <= 6) {
     return {
       call_type: 'scrap',
       confidence: 0.99,
-      evidence: `Call duration is ${durationSeconds}s (less than 8 seconds scrap threshold).`,
+      evidence: `Call duration is ${durationSeconds}s (within <= 6s scrap threshold).`,
       evidence_speaker: 'SYSTEM',
       evidence_timestamp: '00:00:00',
-      reason: 'Scrap call: short disconnect, missed ring, or failed connection under 8s.',
+      reason: 'Scrap call: short disconnect, missed ring, or failed connection <= 6s.',
       is_scrap: true,
       model_used: 'deterministic-telephony-watchdog-v18',
     };
   }
 
-  // Check 2: Empty, silent, or negligible transcript
-  if (!transcript || transcript.trim().length < 10) {
+  // Check 2: Empty or completely silent transcript
+  if (!transcript || !transcript.trim() || (transcript.trim().length < 6 && (!durationSeconds || durationSeconds <= 10))) {
     return {
       call_type: 'scrap',
       confidence: 0.95,
@@ -94,7 +96,7 @@ export function detectScrapCall(
   // Check 3: Automated voicemail / carrier telecom disconnect
   const lowerText = transcript.toLowerCase();
   for (const vmTerm of SCRAP_VOICEMAIL_PATTERNS) {
-    if (lowerText.includes(vmTerm)) {
+    if (lowerText.includes(vmTerm) && (!durationSeconds || durationSeconds <= 25 || transcript.length < 200)) {
       return {
         call_type: 'scrap',
         confidence: 0.98,
@@ -167,12 +169,14 @@ export function classifyCallIntent(
     /\b(?:order\s+(?:laga|daal|punch|place|execute)\s*(?:do|dijiye|karo))\b/i,
     /\b(?:buy|purchase|sell)\s+(?:order\s+(?:for|of)\s+)?\d+\s+(?:shares?|lots?|qty)\b/i,
     /\b\d+\s+(?:shares?|lots?|qty)\s+(?:of\s+)?(?:buy|purchase|sell)\b/i,
-    /\b(?:buy|sell)\s+[a-z0-9]+\s+(?:at|pe)\s+(?:cmp|market\s+price|\d+)\b/i,
+    /\b(?:buy|sell)\s+(?:\d+\s+)?(?:shares?\s+(?:of\s+)?)?[a-z0-9&]+\s+(?:at|pe|on|for)\s+(?:cmp|current\s+market\s+price|market\s+price|\d+)\b/i,
+    /\b(?:buy|sell|purchase)\s+\d+\s+[a-z0-9&]+\b/i,
     /\bconfirming\s+(?:the\s+)?(?:buy|sell|order)\s+(?:for|of)\b/i,
     /\b(?:shall\s+i|can\s+i)\s+(?:execute|place|punch)\s+(?:the\s+)?order\b/i,
-    /\border\s+(?:has\s+been\s+)?(?:executed|punched|placed)\b/i,
+    /\border\s+(?:has\s+been\s+)?(?:executed|punched|placed|confirmed)\b/i,
     /\bbhav\s+pe\s+(?:le\s+lo|bech\s+do|kharid\s+lo)\b/i,
     /\b(?:buy|sell)\s+\d+\s+(?:shares?|lots?|qty)\s+(?:of\s+)?[a-z0-9]+\b/i,
+    /\b(?:le\s+lo|bech\s+do|kharid\s+lo|punch\s+kar\s+do|dal\s+do|daal\s+do)\b/i,
   ];
 
   // Pure Discussion / Advisory / Non-actionable Inquiry Patterns
@@ -209,15 +213,29 @@ export function classifyCallIntent(
     }
   }
 
+  // 4-of-5 Parameter Evaluation (SEBI Stage 4 standard)
+  const hasBuySellDirective = /\b(?:buy|buying|sell|selling|order|punch|execute|kharid|bech|le\s+lo|de\s+do|square\s*off)\b/i.test(text);
+  const hasPriceOrCmp = /\b(?:cmp|current\s*market\s*price|market\s*price|market\s*rate|at\s*market|bhav|rate|price|rs\.?|₹|\d+(?:\.\d+)?\s*(?:rs|rupees|pe))\b/i.test(text);
+  const hasQuantity = /\b(?:\d+\s*(?:shares?|lots?|qty|units|nag)|(?:one|two|three|four|five|ten|hundred|thousand|sau|hazaar)\s*(?:shares?|lots?|qty)?)\b/i.test(text) || /\b(?:buy|sell)\s+\d+\b/i.test(text);
+  const hasClientCode = /\b[A-Za-z]{2,5}[\s\-._]*\d{2,8}\b/i.test(text) || /\b(?:ucc|client\s*code|account)\b/i.test(text);
+  const hasStock = /\b(?:nifty|banknifty|reliance|tcs|infy|infosys|hdfc|icici|sbin|sbi|tata|wipro|shares?|stocks?|scrip)\b/i.test(text);
+
+  let paramScore = 0;
+  if (hasBuySellDirective) paramScore++;
+  if (hasPriceOrCmp) paramScore++;
+  if (hasQuantity) paramScore++;
+  if (hasClientCode) paramScore++;
+  if (hasStock) paramScore++;
+
   // Decision Logic:
-  if (hasActionableOrder && !hasDiscussionOnly) {
+  if (paramScore >= 4 || (hasActionableOrder && !hasDiscussionOnly)) {
     return {
       call_type: 'pre_order',
       confidence: 0.95,
-      evidence: orderEvidence,
+      evidence: orderEvidence || (text.slice(0, 100)),
       evidence_speaker: 'CLIENT',
       evidence_timestamp: '00:00:10',
-      reason: 'Actionable trading order directive detected in conversation.',
+      reason: `Pre-order confirmed: ${paramScore >= 4 ? `${paramScore}/5 parameters verified` : 'Actionable trading order directive detected'}.`,
       model_used: 'semantic-rules-v18',
       prompt_version: 'v18.0.0',
     };

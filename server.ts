@@ -3197,24 +3197,25 @@ ${call.transcript || '(No speech transcript recorded)'}
   });
 
   // Re-classify all calls according to pre_order / regular / scrap rules
-  apiRouter.post('/calls/classify-all', requireAuth, (_req: Request, res: Response) => {
+  apiRouter.post('/calls/classify-all', requireAuth, async (_req: Request, res: Response) => {
     try {
       const calls = sqlite.prepare('SELECT id, duration_seconds, transcript FROM calls').all() as { id: number; duration_seconds?: number; transcript?: string }[];
       let updatedCount = 0;
-      const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
 
-      sqlite.exec('BEGIN TRANSACTION;');
       for (const c of calls) {
-        const classification = classifyCallIntent(c.transcript, c.duration_seconds);
-        sqlite.prepare('UPDATE calls SET call_type = ?, preorder_evidence = ?, updated_at = ? WHERE id = ?')
-          .run(classification.call_type, classification.evidence, now, c.id);
+        try {
+          await stage4ClassifyCall(sqlite, c.id);
+        } catch {
+          const classification = classifyCallIntent(c.transcript, c.duration_seconds);
+          const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
+          sqlite.prepare('UPDATE calls SET call_type = ?, preorder_evidence = ?, updated_at = ? WHERE id = ?')
+            .run(classification.call_type, classification.evidence, now, c.id);
+        }
         updatedCount++;
       }
-      sqlite.exec('COMMIT;');
 
       return res.json({ ok: true, updated: updatedCount, message: `Reclassified ${updatedCount} call(s).` });
     } catch (err: unknown) {
-      try { sqlite.exec('ROLLBACK;'); } catch {}
       return res.status(500).json({ ok: false, error: (err as Error).message });
     }
   });

@@ -225,12 +225,11 @@ export const CallsView: React.FC<CallsViewProps> = ({
 
     calls.forEach((c) => {
       const dur = c.duration_seconds || 0;
-      if (c.call_type === 'pre_order') {
-        preOrder++;
-      } else if (c.call_type === 'regular' || c.call_type === 'non_pre_order') {
-        regular++;
-      } else if (c.call_type === 'scrap' || (dur > 0 && dur <= 6)) {
+      const isScrap = c.call_type === 'scrap' || (dur > 0 && dur <= 6);
+      if (isScrap) {
         scrap++;
+      } else if (c.call_type === 'pre_order') {
+        preOrder++;
       } else {
         regular++;
       }
@@ -245,8 +244,8 @@ export const CallsView: React.FC<CallsViewProps> = ({
       // Category filter
       const dur = c.duration_seconds || 0;
       const isScrap = c.call_type === 'scrap' || (dur > 0 && dur <= 6);
-      const isPreOrder = c.call_type === 'pre_order';
-      const isRegular = (c.call_type === 'regular' || c.call_type === 'non_pre_order') && !isScrap;
+      const isPreOrder = c.call_type === 'pre_order' && !isScrap;
+      const isRegular = !isScrap && !isPreOrder;
 
       if (categoryFilter === 'pre_order' && !isPreOrder) return false;
       if (categoryFilter === 'regular' && !isRegular) return false;

@@ -12,7 +12,15 @@ import {
   normalizeOrderSide,
   normalizeClientCode,
   normalizePhoneNumber,
+  matchClientCodeInTranscript,
+  matchSymbolInTranscript,
+  matchPriceInTranscript,
+  matchQuantityInTranscript,
 } from '../server/normalizer';
+import {
+  classifyCallIntent,
+  detectScrapCall,
+} from '../server/classifier';
 import {
   prepareAudioForAsr,
   transcribeAudioFile,
@@ -593,6 +601,137 @@ runTest('Test W: End-to-end audit accuracy on 50 and 100 calls', () => {
       assert.strictEqual(scoreRes.finalScore, 5);
     }
   }
+});
+
+// -------------------------------------------------------------
+// Test X: Segregation of Call Types (Pre-Order, Regular, Scrap)
+// -------------------------------------------------------------
+runTest('Test X: Segregation of Pre-Order, Regular, and Scrap calls', () => {
+  // 1. Duration <= 6 seconds MUST be classified as SCRAP
+  const scrapByDuration1 = detectScrapCall('Hello advisor', 5);
+  assert.strictEqual(scrapByDuration1?.call_type, 'scrap', 'Calls <= 6s must be SCRAP');
+  const scrapByDuration2 = classifyCallIntent('Hello please', 6);
+  assert.strictEqual(scrapByDuration2.call_type, 'scrap', 'Calls <= 6s must be SCRAP');
+
+  // 2. Duration >= 7 seconds is NOT SCRAP by duration alone
+  const nonScrap7s = detectScrapCall('Advisor: Good morning. What is your market view today?', 7);
+  assert.strictEqual(nonScrap7s, null, 'Call >= 7s is not scrap by duration');
+
+  // 3. Regular calls: Market inquiries, account servicing, or advice without order execution
+  const regular1 = classifyCallIntent('Good morning, what is your market outlook on Nifty today?', 15);
+  assert.strictEqual(regular1.call_type, 'regular', 'Market outlook inquiry must be REGULAR');
+  const regular2 = classifyCallIntent('I called regarding my ledger statement and dividend payout.', 20);
+  assert.strictEqual(regular2.call_type, 'regular', 'Account query must be REGULAR');
+  const regular3 = classifyCallIntent('We gave a buy call yesterday on TCS but holding for long term, mat becho.', 25);
+  assert.strictEqual(regular3.call_type, 'regular', 'Advice not to sell must be REGULAR');
+
+  // 4. Pre-Order calls: Actionable order execution mandate with parameters
+  const preOrder1 = classifyCallIntent('Advisor: Account WIA123. Buy 100 shares of Reliance at CMP. Client: Yes execute.', 18);
+  assert.strictEqual(preOrder1.call_type, 'pre_order', 'Direct execution must be PRE_ORDER');
+  const preOrder2 = classifyCallIntent('Please place buy order for 50 shares of Tata Motors at market price.', 12);
+  assert.strictEqual(preOrder2.call_type, 'pre_order', 'Place order request must be PRE_ORDER');
+  const preOrder3 = classifyCallIntent('Bhav pe 200 shares le lo Reliance ke, order laga do.', 14);
+  assert.strictEqual(preOrder3.call_type, 'pre_order', 'Hindi execution phrase must be PRE_ORDER');
+});
+
+// -------------------------------------------------------------
+// Test Y: Advanced Q2 UCC Verification
+// -------------------------------------------------------------
+runTest('Test Y: Advanced Q2 UCC Verification with phonetic & numeric tolerances', () => {
+  // 1. Exact match
+  const res1 = matchClientCodeInTranscript('WIA46884', 'Advisor: Client UCC code WIA46884 confirmed.');
+  assert.strictEqual(res1.matched, true);
+
+  // 2. Phonetic variations: Whisper transcribing WIA as VIA or WAA or WAS
+  const resVia = matchClientCodeInTranscript('WIA46884', 'Advisor: Client code VIA 46884 verified.');
+  assert.strictEqual(resVia.matched, true, 'VIA phonetic variation must match WIA');
+
+  // 3. Spoken code with speech variation (e.g. WAS 9767 vs WAA9767)
+  const resWasWaa = matchClientCodeInTranscript('WAA9767', 'Advisor: Confirming account WAS 9767 before trade.');
+  assert.strictEqual(resWasWaa.matched, true, 'WAS 9767 must match WAA9767');
+
+  // 4. Spoken English digits: "WIA four six eight eight four"
+  const resSpoken = matchClientCodeInTranscript('WIA46884', 'Advisor: Client W I A four six eight eight four.');
+  assert.strictEqual(resSpoken.matched, true, 'Spoken digits must match');
+
+  // 5. Numeric code confirmation: client/advisor confirms 5-digit number
+  const resNumOnly = matchClientCodeInTranscript('WIA26779', 'Your account number 26779 is verified.');
+  assert.strictEqual(resNumOnly.matched, true, 'Numeric suffix match must succeed');
+
+  // 6. End-to-end Q2 evaluation in audit evaluator
+  const callAudit = makeCall({
+    id: 101,
+    calling_number: '9876543210',
+    registered_number: '9876543210',
+    client: 'WAA9767',
+    transcript: 'Advisor: Account WAS 9767 verified. Placing buy 100 shares TCS at CMP. Client: Yes.',
+  });
+  const auditRes = evaluateEvidenceCompliance(callAudit, [], callAudit.transcript!);
+  assert.strictEqual(auditRes.audit.q2.status, 'PASS', 'Q2 must PASS for phonetic speech tolerance');
+});
+
+// -------------------------------------------------------------
+// Test Z: Advanced Q3 Order Parameters (Stock, Price, Quantity)
+// -------------------------------------------------------------
+runTest('Test Z: Advanced Q3 Order Parameters Verification', () => {
+  // 1. Stock Aliases matching
+  assert.strictEqual(matchSymbolInTranscript('BAJAJFINSV', 'Buy Bajaj Finserv at CMP').matched, true);
+  assert.strictEqual(matchSymbolInTranscript('RELIANCE', 'Buy Reliance Industries at market').matched, true);
+  assert.strictEqual(matchSymbolInTranscript('TATAMOTORS', 'Buy Tata Motors 100 shares').matched, true);
+
+  // 2. Market Price / CMP variations in Hindi & English
+  assert.strictEqual(matchPriceInTranscript(250, 'Order placed at current market price'), true);
+  assert.strictEqual(matchPriceInTranscript(250, 'jo rate chal raha hai us bhav pe le lo'), true);
+  assert.strictEqual(matchPriceInTranscript(250, 'CMP pe punch kar do'), true);
+  assert.strictEqual(matchPriceInTranscript(250, 'Market rate pe exit kar do'), true);
+  assert.strictEqual(matchPriceInTranscript(248, 'Price is 250 rupees'), true, 'Within 10% price tolerance');
+
+  // 3. Spoken quantities in English and Hindi
+  assert.strictEqual(matchQuantityInTranscript(100, 'Buy hundred shares of TCS'), true);
+  assert.strictEqual(matchQuantityInTranscript(16, 'Buy solah shares'), true);
+  assert.strictEqual(matchQuantityInTranscript(50, 'pachaas lots buy karo'), true);
+  assert.strictEqual(matchQuantityInTranscript(100, 'sara bech do, full position exit'), true, 'Full exit must match');
+
+  // 4. Strict Q3 3-element rule in audit evaluator: ALL 3 MUST BE CONFIRMED
+  // A. All 3 present -> PASS
+  const callAll3 = makeCall({
+    id: 102,
+    client: 'WIA123',
+    calling_number: '9876543210',
+    registered_number: '9876543210',
+    transcript: 'Advisor: Client WIA123. Buying 100 shares of Reliance at current market price. Client: Yes confirm.',
+  });
+  assert.strictEqual(evaluateEvidenceCompliance(callAll3, [], callAll3.transcript!).audit.q3.status, 'PASS');
+
+  // B. Missing Stock -> FAIL
+  const callMissingStock = makeCall({
+    id: 103,
+    client: 'WIA123',
+    calling_number: '9876543210',
+    registered_number: '9876543210',
+    transcript: 'Advisor: Client WIA123. Buying 100 shares at current market price. Client: Yes confirm.',
+  });
+  assert.strictEqual(evaluateEvidenceCompliance(callMissingStock, [], callMissingStock.transcript!).audit.q3.status, 'FAIL');
+
+  // C. Missing Quantity -> FAIL
+  const callMissingQty = makeCall({
+    id: 104,
+    client: 'WIA123',
+    calling_number: '9876543210',
+    registered_number: '9876543210',
+    transcript: 'Advisor: Client WIA123. Buying Reliance at current market price. Client: Yes confirm.',
+  });
+  assert.strictEqual(evaluateEvidenceCompliance(callMissingQty, [], callMissingQty.transcript!).audit.q3.status, 'FAIL');
+
+  // D. Missing Price/CMP -> FAIL
+  const callMissingPrice = makeCall({
+    id: 105,
+    client: 'WIA123',
+    calling_number: '9876543210',
+    registered_number: '9876543210',
+    transcript: 'Advisor: Client WIA123. Buying 100 shares of Reliance. Client: Yes confirm.',
+  });
+  assert.strictEqual(evaluateEvidenceCompliance(callMissingPrice, [], callMissingPrice.transcript!).audit.q3.status, 'FAIL');
 });
 
 console.log('===========================================================');

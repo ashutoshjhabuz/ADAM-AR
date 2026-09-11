@@ -171,46 +171,40 @@ export function evaluateDeterministicQ3(
     if (trade?.quantity && trade.quantity > 0) {
       if (matchQuantityInTranscript(trade.quantity, transcript)) {
         isQtyConfirmed = true;
-        detectedQty = String(trade.quantity);
-      } else if (lowerTranscript.includes(String(trade.quantity))) {
+        detectedQty = `${trade.quantity} shares`;
+      } else if (new RegExp(`\\b${trade.quantity}\\b`).test(transcript)) {
         isQtyConfirmed = true;
-        detectedQty = String(trade.quantity);
+        detectedQty = `${trade.quantity} shares`;
       }
     }
 
     if (!isQtyConfirmed) {
-      // Check for spoken words (solah, sixteen, 16, etc.)
-      if (trade?.quantity && NUMBER_WORDS[String(trade.quantity).toLowerCase()]) {
-        isQtyConfirmed = true;
-        detectedQty = String(trade.quantity);
-      } else {
-        for (const [word, num] of Object.entries(NUMBER_WORDS)) {
-          const wordRegex = new RegExp(`\\b${word}\\b`, 'i');
-          if (wordRegex.test(lowerTranscript)) {
-            isQtyConfirmed = true;
-            detectedQty = String(num);
-            break;
-          }
-        }
-      }
-    }
+      // Check for explicit share pattern in transcript: e.g. "16 share", "100 shares", "50 qty", "buy 100"
+      const qtyMatch = lowerTranscript.match(/\b(\d+)\s*(?:shares?|lots?|qty|quantities|quantity|nag|hisse|piece|share)\b/i)
+        || lowerTranscript.match(/\b(?:buy|sell|purchase|order)\s+(\d+)\s+(?:shares?\s+of\s+)?[a-z0-9&]+\b/i)
+        || lowerTranscript.match(/\b(?:buy|sell|purchase|order)\s+(\d+)\b/i);
 
-    if (!isQtyConfirmed) {
-      // Any explicit share number: e.g. "16 share", "100 shares", "50 qty"
-      const qtyMatch = lowerTranscript.match(/\b(\d+)\s*(?:shares?|qty|quantity|sh|pe)\b/i);
       if (qtyMatch) {
         isQtyConfirmed = true;
-        detectedQty = qtyMatch[1];
-      } else if (trade?.quantity && trade.quantity > 0) {
-        // If trade exists and transcript confirms order execution
-        isQtyConfirmed = true;
-        detectedQty = String(trade.quantity);
+        detectedQty = `${qtyMatch[1]} shares`;
+      }
+    }
+
+    if (!isQtyConfirmed) {
+      // Check for spoken words with explicit share keyword: e.g. "solah share", "hundred shares"
+      for (const [word, num] of Object.entries(NUMBER_WORDS)) {
+        const spokenShareRegex = new RegExp(`\\b${word}\\s*(?:shares?|lots?|qty|quantity|nag|hisse)\\b`, 'i');
+        if (spokenShareRegex.test(lowerTranscript)) {
+          isQtyConfirmed = true;
+          detectedQty = `${num} shares (${word})`;
+          break;
+        }
       }
     }
   }
 
   if (!detectedQty) {
-    detectedQty = trade?.quantity ? String(trade.quantity) : 'Confirmed';
+    detectedQty = isQtyConfirmed ? (trade?.quantity ? `${trade.quantity} shares` : 'Confirmed') : 'Missing / Unspecified';
   }
 
   // -------------------------------------------------------------
