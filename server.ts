@@ -124,42 +124,35 @@ const upload = multer({
   },
 });
 
-// Authoritative SEBI Compliance Rubric (5-Point Scale: Q1 to Q5, Maximum 5)
+// Default SEBI Compliance Rubric (4-Point Scale: Q1 to Q4)
 const DEFAULT_RUBRIC: RubricItem[] = [
   {
     id: 'Q1',
     question: "Confirmation given in the Customer's Registered / authorised Number ?",
     fatal: true,
-    weight: 0.2,
+    weight: 0.25,
     rule: 'PASS only when calling number matches registered number or client is authenticated via spoken OTP/security questions. If registered number is missing, mark REVIEW. If mismatched & unverified, mark FAIL (FATAL).',
   },
   {
     id: 'Q2',
     question: 'Was the client code explicitly confirmed before the order?',
     fatal: true,
-    weight: 0.2,
+    weight: 0.25,
     rule: 'PASS only when the adviser or client explicitly confirms the client code in the call transcript prior to order placement.',
   },
   {
     id: 'Q3',
     question: 'Were stock name, price and quantity explicitly confirmed before the order?',
     fatal: false,
-    weight: 0.2,
-    rule: 'PASS only when dialogue confirms all three trade details: stock name, price (or CMP) and quantity. If any one is missing, FAIL and deduct one mark.',
+    weight: 0.25,
+    rule: 'PASS only when the adviser mentions all three trade details: stock name, price and quantity. If any one is missing, FAIL and deduct one mark.',
   },
   {
     id: 'Q4',
-    question: 'Customer Acknowledge the same? (Default PASS / Not Audited)',
+    question: 'Customer Acknowledge the same?',
     fatal: false,
-    weight: 0.2,
-    rule: 'Default PASS — Parameter is not audited under active SEBI rubric. 1 mark granted by default.',
-  },
-  {
-    id: 'Q5',
-    question: 'Return / Profit Guarantee Prohibition',
-    fatal: true,
-    weight: 0.2,
-    rule: 'PASS when advisor makes no prohibited return promises or profit guarantees. Fatal only when an actual return/profit guarantee is made by the advisor.',
+    weight: 0.25,
+    rule: 'Assess customer acknowledgement from the transcript when there is clear evidence (affirmative consent, "yes", "okay", "execute"). This parameter is non-fatal (-1 mark if missing).',
   },
 ];
 
@@ -681,9 +674,6 @@ function initSettings() {
     const existing = getSetting.get(k);
     if (!existing || (!existing.value && v)) {
       setSetting.run(k, v);
-    } else if (k === 'audit_rubric_json' && (!String(existing.value).includes('Q5') || String(existing.value).includes('0.25'))) {
-      // Upgrade stored rubric to authoritative 5-point scale
-      setSetting.run(k, JSON.stringify(DEFAULT_RUBRIC));
     }
   }
 }
@@ -4889,25 +4879,8 @@ ${call.transcript || '(No speech transcript recorded)'}
       const resolvedRegisteredPhone = (sc.registered_number && sc.registered_number !== '—') ? sc.registered_number : (call?.registered_number || matchedTrade?.client_number || matchedTrade?.phone_number || resolvedCallingPhone);
       const resolvedTradePhone = (sc.trade_phone && sc.trade_phone !== '—') ? sc.trade_phone : (matchedTrade?.client_number || matchedTrade?.phone_number || resolvedRegisteredPhone);
 
-      const q1 = sc.q1_status || 'PASS';
-      const q2 = sc.q2_status || 'PASS';
-      const q3 = sc.q3_status || 'PASS';
-      const q4 = 'PASS';
-      const q5 = sc.q5_status || 'PASS';
-      const auth = calculateAuthoritativeScore({
-        q1: { status: q1 as any },
-        q2: { status: q2 as any },
-        q3: { status: q3 as any },
-        q4: { status: 'PASS' },
-        q5: { status: q5 as any },
-      });
-      const computedScore = auth.finalScore;
-      const computedFatal = auth.isFatal;
-
       return {
         ...sc,
-        score: computedScore,
-        is_fatal: computedFatal ? 1 : 0,
         client_code: authoritativeCode,
         client: authoritativeCode,
         caller_name: sc.caller_name || call?.caller_name || matchedTrade?.advisor_name || '—',
@@ -4985,8 +4958,17 @@ ${call.transcript || '(No speech transcript recorded)'}
         q4: { status: 'PASS' },
         q5: { status: newQ5 as any },
       });
-      const isFatal = authResult.isFatal;
-      const finalScore = authResult.finalScore;
+      let isFatal = authResult.isFatal;
+      let calculatedScore = authResult.finalScore;
+
+      let finalScore = calculatedScore;
+      if (score !== undefined && score !== null && score !== '') {
+        const parsed = parseInt(String(score), 10);
+        if (!isNaN(parsed) && parsed >= 0 && parsed <= 5) {
+          finalScore = parsed;
+          isFatal = finalScore === 0 || isFatal;
+        }
+      }
 
       const comment = (feedback !== undefined || audit_comment !== undefined)
         ? String(feedback !== undefined ? feedback : audit_comment).trim()
@@ -5111,7 +5093,9 @@ ${call.transcript || '(No speech transcript recorded)'}
           q5: { status: newQ5 as any },
         });
         const isFatal = auth.isFatal;
-        const finalScore = auth.finalScore;
+        const calcScore = auth.finalScore;
+
+        const finalScore = data.score !== undefined ? parseInt(String(data.score), 10) : calcScore;
         const comment = data.feedback || existing.audit_comment || (isFatal ? 'NON-COMPLIANT: Regulatory compliance violation.' : 'Pre Order Confirmation is as per the Regulatory Norm.');
 
         sqlite.prepare(`

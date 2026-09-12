@@ -31,14 +31,6 @@ import { api, getStoredToken } from '../lib/api';
 import { TranscriptHighlighter } from './TranscriptHighlighter';
 import { ManualTradeAuditView } from './ManualTradeAuditView';
 
-export function computeAuthoritativeScore(q1?: string, q2?: string, q3?: string, _q4?: string, q5?: string): number {
-  if (q1 === 'FAIL' || q2 === 'FAIL' || q5 === 'FAIL') return 0;
-  if (q1 === 'REVIEW' || q2 === 'REVIEW' || q5 === 'REVIEW') return 0;
-  let s = 5;
-  if (q3 !== 'PASS') s -= 1;
-  return Math.max(0, s);
-}
-
 interface AuditedMasterViewProps {
   scorecards: ScorecardRecord[];
   onUpdateScorecard: (
@@ -225,7 +217,7 @@ export const AuditedMasterView: React.FC<AuditedMasterViewProps> = ({
       q3_status: sc.q3_status || 'PASS',
       q4_status: 'PASS',
       q5_status: sc.q5_status || 'PASS',
-      score: computeAuthoritativeScore(sc.q1_status, sc.q2_status, sc.q3_status, 'PASS', sc.q5_status),
+      score: typeof sc.score === 'number' ? sc.score : 5,
       feedback: String(sc.audit_comment || ''),
       is_dirty: false,
     };
@@ -464,11 +456,10 @@ export const AuditedMasterView: React.FC<AuditedMasterViewProps> = ({
       if (dateTo && rowDate && rowDate > dateTo) return false;
 
       // Disposition
-      const dynamicScore = computeAuthoritativeScore(sc.q1_status, sc.q2_status, sc.q3_status, 'PASS', sc.q5_status);
-      const isFatal = sc.is_fatal || sc.q1_status === 'FAIL' || sc.q2_status === 'FAIL' || sc.q5_status === 'FAIL' || dynamicScore === 0;
+      const isFatal = sc.is_fatal || sc.q1_status === 'FAIL' || sc.q2_status === 'FAIL' || sc.q5_status === 'FAIL' || sc.score === 0;
       if (dispositionFilter === 'FATAL' && !isFatal) return false;
-      if (dispositionFilter === 'COMPLIANT' && (isFatal || dynamicScore < 4)) return false;
-      if (dispositionFilter === 'REVIEW' && (isFatal || dynamicScore >= 4)) return false;
+      if (dispositionFilter === 'COMPLIANT' && (isFatal || (sc.score || 0) < 4)) return false;
+      if (dispositionFilter === 'REVIEW' && (isFatal || (sc.score || 0) >= 4)) return false;
 
       return true;
     });
@@ -478,10 +469,7 @@ export const AuditedMasterView: React.FC<AuditedMasterViewProps> = ({
       let valA: any = a ? a[sortField as keyof ScorecardRecord] ?? '' : '';
       let valB: any = b ? b[sortField as keyof ScorecardRecord] ?? '' : '';
 
-      if (sortField === 'score') {
-        valA = computeAuthoritativeScore(a?.q1_status, a?.q2_status, a?.q3_status, 'PASS', a?.q5_status);
-        valB = computeAuthoritativeScore(b?.q1_status, b?.q2_status, b?.q3_status, 'PASS', b?.q5_status);
-      } else if (sortField === 'id') {
+      if (sortField === 'id' || sortField === 'score') {
         valA = Number(valA) || 0;
         valB = Number(valB) || 0;
       } else {

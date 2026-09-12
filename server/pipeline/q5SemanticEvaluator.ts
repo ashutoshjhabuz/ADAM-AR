@@ -21,39 +21,23 @@ const PROHIBITED_ENGLISH = [
   /\b(?:definite\s+return|fixed\s+return|assured\s+income|capital\s+(?:guaranteed|protection\s+guaranteed))\b/i,
   /\b(?:100%\s+(?:safe|guarantee|risk\s*free)|zero\s+risk|risk\s*free\s+return|no\s+loss\s+guaranteed)\b/i,
   /\b(?:you\s+will\s+definitely\s+make|sure\s*shot\s+profit|will\s+double\s+your\s+money|surely\s+double)\b/i,
-  /\b(?:cannot\s+lose\s+money|impossible\s+to\s+lose|guaranteed\s+multibagger|tension\s+mat\s+lo)\b/i,
+  /\b(?:cannot\s+lose\s+money|impossible\s+to\s+lose|guaranteed\s+multibagger)\b/i,
 ];
 
 // Hindi / Hinglish prohibited assurance patterns
 const PROHIBITED_HINDI_HINGLISH = [
-  /\b(?:pakka\s+(?:profit|return|fayda|munafa)|paisa\s+(?:double|do\s+guna)\s+hoga|double\s+ho\s+jayega)\b/i,
+  /\b(?:pakka\s+(?:profit|return|fayda)|paisa\s+(?:double|do\s+guna)\s+hoga|double\s+ho\s+jayega)\b/i,
   /\b(?:loss\s+bilkul\s+nahi|koi\s+risk\s+nahi|bilkul\s+safe\s+hai|loss\s+ka\s+koi\s+chance\s+nahi)\b/i,
   /\b(?:meri\s+(?:guarantee|pakkii\s+guarantee)|100%\s+guarantee\s+hai|fix\s+return\s+milega)\b/i,
-  /\b(?:profit\s+hi\s+profit|paisa\s+dubne\s+ka\s+sawal\s+nahi|mera\s+vaada\s+hai|tension\s+mat\s+lijiye)\b/i,
-  /\b(?:aaram\s+se\s+double|sure\s+shot\s+milega|capital\s+surakshit\s+hai)\b/i,
-];
-
-// Multilingual Indian regional language prohibited assurance patterns (Gujarati, Tamil, Telugu, Marathi, Bengali)
-const PROHIBITED_REGIONAL_INDIAN = [
-  // Gujarati
-  /\b(?:nuksan\s+nahi\s+thay|pakko\s+faydo\s+thashe|paisa\s+double\s+thashe|koi\s+risk\s+nathi|mari\s+guarantee)\b/i,
-  // Tamil
-  /\b(?:kandippa\s+labam|panam\s+double\s+aagum|oru\s+bayamum\s+illa|100%\s+guarantee\s+irukku|loss\s+kidayadhu)\b/i,
-  // Telugu
-  /\b(?:khachitamga\s+labham|dabbulu\s+double\s+avthayi|em\s+risk\s+ledu|naadi\s+guarantee|loss\s+undadhu)\b/i,
-  // Marathi
-  /\b(?:nakki\s+faayda\s+honar|paisa\s+double\s+honar|kahi\s+risk\s+nahi|pakkhi\s+guarantee|nuksan\s+honarch\s+nahi)\b/i,
-  // Bengali
-  /\b(?:nishchito\s+labh|taka\s+double\s+hobe|kono\s+risk\s+nei|pukka\s+guarantee|loss\s+hobar\s+chance\s+nei)\b/i,
+  /\b(?:profit\s+hi\s+profit|paisa\s+dubne\s+ka\s+sawal\s+nahi|mera\s+vaada\s+hai)\b/i,
 ];
 
 // Legitimate regulatory disclaimers & negations that negate promissory intent
 const DISCLAIMERS_AND_NEGATIONS = [
-  /\b(?:cannot\s+guarantee|no\s+guarantee|not\s+guaranteed|does\s+not\s+guarantee|we\s+do\s+not\s+guarantee)\b/i,
-  /\b(?:no\s+assurance|subject\s+to\s+market\s+risk|market\s+risks?|risk\s+involved|past\s+performance)\b/i,
-  /\b(?:guarantee\s+nahi\s+hai|guarantee\s+nahi\s+de\s+sakte|market\s+pe\s+depend|bazaar\s+jokhim)\b/i,
-  /\b(?:loss\s+bhi\s+ho\s+sakta|volatility\s+hai|equities\s+are\s+risky|stop\s*loss|risk\s+rehta\s+hai)\b/i,
-  /\b(?:cannot\s+promise|no\s+fixed\s+return|shares\s+fluctuate|market\s+fluctuations)\b/i,
+  /\b(?:cannot\s+guarantee|no\s+guarantee|not\s+guaranteed|does\s+not\s+guarantee)\b/i,
+  /\b(?:no\s+assurance|subject\s+to\s+market\s+risk|market\s+risks?|risk\s+involved)\b/i,
+  /\b(?:guarantee\s+nahi\s+hai|guarantee\s+nahi\s+de\s+sakte|market\s+pe\s+depend)\b/i,
+  /\b(?:loss\s+bhi\s+ho\s+sakta|volatility\s+hai|equities\s+are\s+risky)\b/i,
 ];
 
 interface LlmQ5Response {
@@ -87,7 +71,7 @@ STRICT AUDIT CRITERIA:
 
 TRANSCRIPT:
 """
-${transcript.slice(0, 60000)}
+${transcript.slice(0, 5000)}
 """
 
 Respond strictly with a valid JSON object matching this schema:
@@ -219,7 +203,7 @@ export async function evaluateQ5SemanticAdvisorPromises(
   }
 
   // Step 2: High-precision semantic rule evaluation across segments with speaker isolation
-  const allPatterns = [...PROHIBITED_ENGLISH, ...PROHIBITED_HINDI_HINGLISH, ...PROHIBITED_REGIONAL_INDIAN];
+  const allPatterns = [...PROHIBITED_ENGLISH, ...PROHIBITED_HINDI_HINGLISH];
 
   let detectedPromise: {
     segment: TranscriptSegment;
@@ -292,19 +276,6 @@ export async function evaluateQ5SemanticAdvisorPromises(
         evidence_verified: true,
       };
     } else {
-      // UNKNOWN speaker: Check if inquiry/question or if global disclaimer neutralizes it
-      const hasDisclaimer = DISCLAIMERS_AND_NEGATIONS.some((d) => d.test(transcript));
-      const isQuestion = /\?|(?:kya|is it|will it|can you|sure hai|safe hai\?)/i.test(detectedPromise.segment.text);
-      if (hasDisclaimer || isQuestion) {
-        return {
-          status: 'PASS',
-          evidence: `Return inquiry identified ("${detectedPromise.quote}"), neutralized by regulatory market risk disclaimer.`,
-          reason: 'Non-promissory dialogue: inquiry addressed with compliant disclaimer.',
-          confidence: 0.88,
-          evidence_verified: true,
-        };
-      }
-
       return {
         status: 'REVIEW',
         evidence: `Potential return assurance statement detected ("${detectedPromise.quote}"), but speaker attribution is UNKNOWN.`,

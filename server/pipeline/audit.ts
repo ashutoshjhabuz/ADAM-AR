@@ -111,18 +111,7 @@ export async function stage7AuditCall(
     }
   }
 
-  let rawRegistered = call.registered_number || (trade ? ((trade as any).customer_number || trade.client_number || trade.phone_number || (trade as any).mobile || (trade as any).mobile_number || (trade as any).contact || (trade as any).contact_no) : '') || call.client_number || '';
-
-  // Authoritative Client Master Verification for Q1
-  const lookupUcc = (call.client_code || call.client || (trade ? trade.client : '') || '').trim().toUpperCase();
-  if (lookupUcc && db) {
-    try {
-      const clientMaster = db.prepare('SELECT phone, mobile FROM clients WHERE UPPER(client_code) = ? LIMIT 1').get(lookupUcc) as any;
-      if (clientMaster?.phone || clientMaster?.mobile) {
-        rawRegistered = clientMaster.phone || clientMaster.mobile || rawRegistered;
-      }
-    } catch {}
-  }
+  const rawRegistered = call.registered_number || (trade ? ((trade as any).customer_number || trade.client_number || trade.phone_number || (trade as any).mobile || (trade as any).mobile_number || (trade as any).contact || (trade as any).contact_no) : '') || call.client_number || '';
 
   const q1Eval = evaluateDeterministicQ1(rawCalling, rawRegistered, transcript);
   const q1Result: AuditQuestionResult = {

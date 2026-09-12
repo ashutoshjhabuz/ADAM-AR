@@ -207,10 +207,10 @@ export const PipelineView: React.FC<PipelineViewProps> = ({
       stage: 8,
       name: 'Scoring Engine',
       icon: Award,
-      desc: 'Authoritative 5-point scale: Q1/Q2/Q5 fatal -> 0, Q3 scored (4/5), Q4 default PASS',
+      desc: 'Deterministic 4-point scale: Q1/Q2 fatal -> 0, Q3/Q4 scored -> 4 max',
       metric: `${stats?.scored || 0} scored`,
       active: (stats?.scored || 0) > 0,
-      badge: 'Max 5 / Fatal 0',
+      badge: 'Max 4 / Fatal 0',
     },
     {
       stage: 9,

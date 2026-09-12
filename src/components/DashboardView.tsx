@@ -316,7 +316,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           </div>
           <div className="text-2xl font-black text-neutral-900">{scored.toLocaleString()}</div>
           <div className="text-xs text-neutral-600 mt-1 flex items-center justify-between">
-            <span>Avg Score: <b>{avgScore}/5</b></span>
+            <span>Avg Score: <b>{avgScore}/4</b></span>
             <span className="font-bold text-amber-600">Finalized</span>
           </div>
         </div>

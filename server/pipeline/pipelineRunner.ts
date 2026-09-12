@@ -404,9 +404,9 @@ export async function runFullPipelineForCall(
     const auditResult = await stage7AuditCall(db, callId, groqApiKey, activeGeminiKey);
 
     // ---------------------------------------------------------
-    // STAGE 8: SCORING (Authoritative 5-Point Engine, Max 5)
+    // STAGE 8: SCORING (Unified Single Engine, Max 4)
     // ---------------------------------------------------------
-    console.log(`[Pipeline] Call #${callId} -> Stage 8: Unified Scoring (Max 5)`);
+    console.log(`[Pipeline] Call #${callId} -> Stage 8: Unified Scoring (Max 4)`);
     const scoreResult = stage8CalculateScore(auditResult);
 
     // ---------------------------------------------------------
@@ -652,17 +652,7 @@ export async function stepAutonomousPipelineWorker(
 
   activeProcessingCallId = nextCall.id;
   try {
-    const pipelineTimeout = new Promise<never>((_, reject) => {
-      const timer = setTimeout(() => {
-        reject(new Error(`Execution timed out (exceeded 90s limit) for call #${nextCall!.id}`));
-      }, 90000);
-      timer.unref?.();
-    });
-
-    await Promise.race([
-      runFullPipelineForCall(db, nextCall.id, groqKey, geminiKey),
-      pipelineTimeout,
-    ]);
+    await runFullPipelineForCall(db, nextCall.id, groqKey, geminiKey);
     return true;
   } catch (err: any) {
     if (err.message && (err.message.includes('429') || err.message.includes('RESOURCE_EXHAUSTED'))) {
@@ -671,16 +661,6 @@ export async function stepAutonomousPipelineWorker(
       return false;
     }
     console.error(`[Autonomous Worker Error] Call #${nextCall.id}: ${err.message}`);
-    // Record failure in call record so it does not permanently stall
-    try {
-      db.prepare(`
-        UPDATE calls SET
-          processing_status = 'FAILED',
-          failure_reason = ?,
-          updated_at = ?
-        WHERE id = ?
-      `).run(err.message || 'Pipeline execution failed', nowIso, nextCall.id);
-    } catch {}
     // RUN-05: A single call failure must not terminate the entire batch!
     // Returning true lets the supervisor continue processing subsequent pending calls.
     return true;
