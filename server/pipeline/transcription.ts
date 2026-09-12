@@ -20,12 +20,24 @@ export interface TranscriptionOutput {
   segments: TranscriptSegment[];
 }
 
+const ASR_HALLUCINATION_PATTERNS = [
+  /subtitles?\s+by(?:\s+the\s+amara\.org\s+community)?/i,
+  /thank\s+you\s+for\s+watching/i,
+  /thanks?\s+for\s+watching/i,
+  /please\s+subscribe/i,
+  /like\s+and\s+subscribe/i,
+  /translated\s+by/i,
+  /transcribed\s+by/i,
+  /\[(?:music|applause|laughter|silence)\]/gi,
+];
+
 function sanitizeTranscript(text: string): string {
   if (!text) return '';
-  return text
-    .replace(/[\u0600-\u06FF]+/g, ' ') // Strip hallucinated Arabic/Urdu scripts
-    .replace(/\s+/g, ' ')
-    .trim();
+  let cleaned = text.replace(/[\u0600-\u06FF]+/g, ' '); // Strip hallucinated Arabic/Urdu scripts
+  for (const pattern of ASR_HALLUCINATION_PATTERNS) {
+    cleaned = cleaned.replace(pattern, ' ');
+  }
+  return cleaned.replace(/\s+/g, ' ').trim();
 }
 
 /**

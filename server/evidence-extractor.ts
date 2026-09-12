@@ -648,7 +648,7 @@ export function extractStructuredOrders(
       .map((s, idx) => ({ id: `seg_${idx + 1}`, text: s.text.toLowerCase() }))
       .filter((s) => s.text.includes(lowerQuote))
       .map((s) => s.id);
-    return matched.length > 0 ? matched : ['seg_1'];
+    return matched.length > 0 ? matched : [];
   };
 
   // Detect temporal context

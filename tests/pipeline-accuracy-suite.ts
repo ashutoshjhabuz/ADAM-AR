@@ -43,6 +43,8 @@ import {
   evaluateMatchingDecision,
   evaluateTimeCorrelation,
 } from '../server/matcher';
+import { stepAutonomousPipelineWorker, runFullPipelineForCall } from '../server/pipeline/pipelineRunner';
+import { stage8CalculateScore } from '../server/pipeline/scoring';
 import type { CallRecord, TradeRecord } from '../src/types';
 
 console.log('===========================================================');
@@ -52,10 +54,13 @@ console.log('===========================================================');
 let passedTests = 0;
 let totalTests = 0;
 
-function runTest(name: string, fn: () => void | Promise<void>) {
+async function runTest(name: string, fn: () => void | Promise<void>) {
   totalTests++;
   try {
-    fn();
+    const res = fn();
+    if (res && typeof (res as any).then === 'function') {
+      await res;
+    }
     console.log(`[PASS] ${name}`);
     passedTests++;
   } catch (err: any) {
@@ -613,15 +618,15 @@ runTest('Test W: End-to-end audit accuracy on 50 and 100 calls', () => {
 // Test X: Segregation of Call Types (Pre-Order, Regular, Scrap)
 // -------------------------------------------------------------
 runTest('Test X: Segregation of Pre-Order, Regular, and Scrap calls', () => {
-  // 1. Duration <= 6 seconds MUST be classified as SCRAP
+  // 1. Duration < 6 seconds MUST be classified as SCRAP
   const scrapByDuration1 = detectScrapCall('Hello advisor', 5);
-  assert.strictEqual(scrapByDuration1?.call_type, 'scrap', 'Calls <= 6s must be SCRAP');
-  const scrapByDuration2 = classifyCallIntent('Hello please', 6);
-  assert.strictEqual(scrapByDuration2.call_type, 'scrap', 'Calls <= 6s must be SCRAP');
+  assert.strictEqual(scrapByDuration1?.call_type, 'scrap', 'Calls < 6s must be SCRAP');
 
-  // 2. Duration >= 7 seconds is NOT SCRAP by duration alone
+  // 2. Duration >= 6 seconds is NOT SCRAP by duration alone (eligible for transcription)
+  const nonScrap6s = detectScrapCall('Advisor: Good morning. What is your market view today?', 6);
+  assert.strictEqual(nonScrap6s, null, 'Call of 6s duration is not scrap by duration alone');
   const nonScrap7s = detectScrapCall('Advisor: Good morning. What is your market view today?', 7);
-  assert.strictEqual(nonScrap7s, null, 'Call >= 7s is not scrap by duration');
+  assert.strictEqual(nonScrap7s, null, 'Call >= 7s is not scrap by duration alone');
 
   // 3. Regular calls: Market inquiries, account servicing, or advice without order execution
   const regular1 = classifyCallIntent('Good morning, what is your market outlook on Nifty today?', 15);
@@ -1119,6 +1124,581 @@ runTest('Test EE: Section Q — Compliance Accuracy Benchmark Verification (Item
   } as any);
   assert.strictEqual(failedScore.score, 0, 'Fatal violation sets score to 0');
   assert.strictEqual(failedScore.disposition, 'NON_COMPLIANT');
+});
+
+// -------------------------------------------------------------
+// Test FF: 15-Call Invariant & Terminal State Reliability (RUN-01)
+// -------------------------------------------------------------
+await runTest('Test FF: 15-Call Invariant & Terminal State Reliability (RUN-01)', async () => {
+  const memDb = new DatabaseSync(':memory:');
+  memDb.exec(`
+    CREATE TABLE calls (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      batch_id TEXT,
+      original_filename TEXT,
+      recording_name TEXT,
+      storage_path TEXT,
+      file_size INTEGER,
+      mime_type TEXT,
+      file_sha256 TEXT,
+      calling_number TEXT,
+      phone_number TEXT,
+      registered_number TEXT,
+      client TEXT,
+      client_code TEXT,
+      client_number TEXT,
+      caller_name TEXT,
+      dealer TEXT,
+      team TEXT,
+      call_date TEXT,
+      call_time TEXT,
+      duration_seconds REAL,
+      transcript TEXT,
+      transcript_raw TEXT,
+      transcript_model TEXT,
+      transcript_status TEXT DEFAULT 'PENDING',
+      classification TEXT DEFAULT 'PENDING',
+      classification_confidence REAL,
+      classification_evidence TEXT,
+      classification_reason TEXT,
+      preorder_confidence REAL,
+      preorder_evidence TEXT,
+      preorder_speaker TEXT,
+      preorder_timestamp TEXT,
+      scrap_reason TEXT,
+      call_type TEXT DEFAULT 'unknown',
+      trade_match_status TEXT DEFAULT 'PENDING',
+      matched_trade_id INTEGER,
+      trade_match_confidence REAL,
+      trade_match_margin REAL,
+      trade_match_reason TEXT,
+      audit_status TEXT DEFAULT 'PENDING',
+      processing_status TEXT DEFAULT 'IDLE',
+      identity_status TEXT DEFAULT 'PENDING',
+      identity_source TEXT,
+      failure_reason TEXT,
+      source TEXT DEFAULT 'upload',
+      status TEXT DEFAULT 'imported',
+      created_at TEXT,
+      updated_at TEXT
+    );
+    CREATE TABLE import_batches (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      batch_id TEXT UNIQUE,
+      total_files INTEGER,
+      uploaded_count INTEGER,
+      status TEXT,
+      created_at TEXT
+    );
+    CREATE TABLE trades (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      client TEXT,
+      client_code TEXT,
+      client_number TEXT,
+      phone_number TEXT,
+      symbol TEXT,
+      order_type TEXT,
+      quantity INTEGER,
+      price REAL,
+      trade_date TEXT,
+      trade_time TEXT,
+      dealer TEXT,
+      advisor_name TEXT,
+      team TEXT
+    );
+    CREATE TABLE call_segments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      call_id INTEGER,
+      segment_id TEXT,
+      start_time REAL,
+      end_time REAL,
+      speaker TEXT,
+      text TEXT,
+      created_at TEXT
+    );
+    CREATE TABLE audits (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      call_id INTEGER UNIQUE,
+      trade_id INTEGER,
+      q1 TEXT, q1_flag TEXT, q1_evidence TEXT, q1_confidence REAL, q1_speaker TEXT,
+      q2 TEXT, q2_flag TEXT, q2_evidence TEXT, q2_confidence REAL, q2_speaker TEXT,
+      q3 TEXT, q3_flag TEXT, q3_evidence TEXT, q3_confidence REAL, q3_speaker TEXT,
+      q4 TEXT, q4_flag TEXT, q4_evidence TEXT, q4_confidence REAL, q4_speaker TEXT,
+      q5 TEXT, q5_flag TEXT, q5_evidence TEXT, q5_confidence REAL, q5_speaker TEXT,
+      score INTEGER,
+      audit_comment TEXT,
+      compliance_disposition TEXT,
+      status TEXT,
+      model TEXT,
+      created_at TEXT,
+      updated_at TEXT
+    );
+    CREATE TABLE scorecards (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      audit_id INTEGER,
+      call_id INTEGER UNIQUE,
+      caller_name TEXT,
+      dealer TEXT,
+      team TEXT,
+      client TEXT,
+      client_code TEXT,
+      resolved_trade_id INTEGER,
+      trade_phone TEXT,
+      calling_number TEXT,
+      registered_number TEXT,
+      trade_date TEXT,
+      call_date TEXT,
+      score INTEGER,
+      is_fatal INTEGER,
+      fatal_reasons TEXT,
+      q1_status TEXT, q1_evidence TEXT,
+      q2_status TEXT, q2_evidence TEXT,
+      q3_status TEXT, q3_evidence TEXT,
+      q4_status TEXT, q4_evidence TEXT,
+      q5_status TEXT, q5_evidence TEXT,
+      audit_comment TEXT,
+      created_at TEXT,
+      updated_at TEXT
+    );
+    CREATE TABLE matches (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      call_id INTEGER,
+      trade_id INTEGER,
+      match_status TEXT,
+      confidence REAL,
+      verification_status TEXT,
+      match_factors TEXT,
+      reasons TEXT,
+      created_at TEXT,
+      updated_at TEXT
+    );
+    CREATE TABLE call_orders (
+      id TEXT PRIMARY KEY,
+      call_id INTEGER NOT NULL,
+      order_index INTEGER NOT NULL,
+      intent_type TEXT NOT NULL,
+      symbol TEXT,
+      raw_symbol TEXT,
+      quantity INTEGER,
+      raw_quantity TEXT,
+      price_type TEXT,
+      limit_price REAL,
+      raw_price TEXT,
+      confidence REAL DEFAULT 1.0,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE order_executions (
+      id TEXT PRIMARY KEY,
+      order_id TEXT NOT NULL,
+      trade_id INTEGER NOT NULL,
+      matched_quantity INTEGER NOT NULL,
+      confidence REAL NOT NULL,
+      margin REAL,
+      reason TEXT,
+      created_at TEXT NOT NULL
+    );
+  `);
+
+  // Populate an executed trade
+  memDb.prepare(`
+    INSERT INTO trades (id, client, client_code, client_number, symbol, order_type, quantity, price, trade_date, trade_time)
+    VALUES (1, 'WIA100', 'WIA100', '9876543210', 'RELIANCE', 'BUY', 50, 2450.0, '2026-09-12', '10:00:00')
+  `).run();
+
+  // Create 15 calls with varied characteristics:
+  // Calls 1..5: Short calls (< 6s) -> SCRAP
+  // Calls 6..10: Regular calls (no trade / non-order) -> REGULAR
+  // Calls 11..15: Pre-order calls -> AUDITED
+  const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
+  for (let i = 1; i <= 15; i++) {
+    const isScrap = i <= 5;
+    const isRegular = i > 5 && i <= 10;
+    const dur = isScrap ? (i === 1 ? 2 : i === 2 ? 4 : 5) : 45;
+    const transcript = isScrap
+      ? 'Advisor: Hello?'
+      : isRegular
+      ? `Advisor: Good morning client ${i}, just market commentary today.`
+      : `Advisor: Confirming buy 50 shares of Reliance at CMP for client WIA100. Client: Haan kar do please.`;
+
+    memDb.prepare(`
+      INSERT INTO calls (
+        id, batch_id, original_filename, recording_name, storage_path, file_size,
+        calling_number, registered_number, client, client_code, duration_seconds,
+        transcript, transcript_status, processing_status, audit_status, classification, status, created_at, updated_at
+      ) VALUES (
+        ?, 'BATCH-TEST-001', ?, ?, '/dummy/path', 1000,
+        '9876543210', '9876543210', ?, ?, ?,
+        ?, 'VALID', 'IDLE', 'PENDING', 'PENDING', 'imported', ?, ?
+      )
+    `).run(
+      i,
+      `call_${i}.mp3`,
+      `call_${i}.mp3`,
+      isRegular ? `WIA0${i}` : 'WIA100',
+      isRegular ? `WIA0${i}` : 'WIA100',
+      dur,
+      transcript,
+      now,
+      now
+    );
+  }
+
+  // Verify all 15 calls are queued
+  const queuedCount = (memDb.prepare('SELECT count(*) as c FROM calls').get() as { c: number }).c;
+  assert.strictEqual(queuedCount, 15, 'All 15 calls must be queued in database');
+
+  // Run autonomous worker steps until all calls are processed
+  let hasMore = true;
+  let safetyLoop = 0;
+  while (hasMore && safetyLoop < 50) {
+    hasMore = await stepAutonomousPipelineWorker(memDb, () => 'dummy_groq_key', () => 'dummy_gemini_key');
+    safetyLoop++;
+  }
+
+  // Check 15/15 reached terminal states
+  const terminalCalls = memDb.prepare(`
+    SELECT id, duration_seconds, status, classification, processing_status
+    FROM calls ORDER BY id ASC
+  `).all() as any[];
+
+  assert.strictEqual(terminalCalls.length, 15, 'Exactly 15 calls exist');
+
+  for (const c of terminalCalls) {
+    assert.ok(
+      c.processing_status === 'COMPLETED' || c.status === 'scrap' || c.status === 'regular' || c.status === 'audited' || c.status === 'review',
+      `Call #${c.id} must be in a terminal state (was ${c.processing_status}, status=${c.status})`
+    );
+
+    if (c.duration_seconds < 6) {
+      assert.strictEqual(c.status, 'scrap', `Call #${c.id} with duration ${c.duration_seconds}s must be SCRAP`);
+      assert.strictEqual(c.classification, 'SCRAP');
+    }
+  }
+
+  const scrapCount = terminalCalls.filter((c) => c.status === 'scrap').length;
+  assert.strictEqual(scrapCount, 5, 'Exactly 5 calls must be SCRAP (< 6s)');
+
+  // Verify scoring engine unification: stage8CalculateScore matches calculateAuthoritativeScore exactly
+  const mockAudit = {
+    q1: { status: 'PASS' as const },
+    q2: { status: 'PASS' as const },
+    q3: { status: 'FAIL' as const },
+    q4: { status: 'PASS' as const },
+    q5: { status: 'PASS' as const },
+    model: 'test',
+  };
+  const s8 = stage8CalculateScore(mockAudit as any);
+  const auth = calculateAuthoritativeScore(mockAudit as any);
+  assert.strictEqual(s8.score, auth.finalScore, 'stage8CalculateScore score must equal calculateAuthoritativeScore');
+  assert.strictEqual(s8.is_fatal, auth.isFatal, 'stage8CalculateScore fatality must match');
+  assert.strictEqual(s8.disposition, auth.disposition, 'stage8CalculateScore disposition must match');
+});
+
+function createTestPipelineDb(): DatabaseSync {
+  const memDb = new DatabaseSync(':memory:');
+  memDb.exec(`
+    CREATE TABLE calls (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      recording_id TEXT,
+      client_code TEXT,
+      client TEXT,
+      advisor TEXT,
+      advisor_name TEXT,
+      dealer TEXT,
+      calling_number TEXT,
+      phone_number TEXT,
+      registered_number TEXT,
+      duration_seconds REAL,
+      call_date TEXT,
+      call_time TEXT,
+      transcript TEXT,
+      transcript_raw TEXT,
+      transcript_status TEXT DEFAULT 'PENDING',
+      transcript_model TEXT,
+      classification TEXT DEFAULT 'PENDING',
+      classification_confidence REAL,
+      classification_evidence TEXT,
+      preorder_confidence REAL,
+      preorder_evidence TEXT,
+      preorder_speaker TEXT,
+      preorder_timestamp TEXT,
+      scrap_reason TEXT,
+      call_type TEXT DEFAULT 'PENDING',
+      status TEXT DEFAULT 'uploaded',
+      audit_status TEXT DEFAULT 'PENDING',
+      processing_status TEXT DEFAULT 'IDLE',
+      failure_reason TEXT,
+      pipeline_stage TEXT DEFAULT 'queued',
+      created_at TEXT,
+      updated_at TEXT
+    );
+    CREATE TABLE call_segments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      call_id INTEGER NOT NULL,
+      segment_id TEXT NOT NULL,
+      start_time REAL NOT NULL,
+      end_time REAL NOT NULL,
+      speaker TEXT NOT NULL,
+      text TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE call_orders (
+      id TEXT PRIMARY KEY,
+      call_id INTEGER NOT NULL,
+      order_index INTEGER NOT NULL,
+      intent_type TEXT NOT NULL,
+      symbol TEXT,
+      raw_symbol TEXT,
+      quantity INTEGER,
+      raw_quantity TEXT,
+      price_type TEXT,
+      limit_price REAL,
+      raw_price TEXT,
+      confidence REAL DEFAULT 1.0,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE order_executions (
+      id TEXT PRIMARY KEY,
+      order_id TEXT NOT NULL,
+      trade_id INTEGER NOT NULL,
+      matched_quantity INTEGER NOT NULL,
+      confidence REAL NOT NULL,
+      margin REAL,
+      reason TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE trades (
+      id INTEGER PRIMARY KEY,
+      client TEXT,
+      client_code TEXT,
+      client_number TEXT,
+      phone_number TEXT,
+      symbol TEXT,
+      order_type TEXT,
+      quantity INTEGER,
+      price REAL,
+      trade_date TEXT,
+      trade_time TEXT,
+      advisor_name TEXT
+    );
+    CREATE TABLE clients (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      client_code TEXT UNIQUE,
+      name TEXT,
+      phone TEXT,
+      email TEXT,
+      pan TEXT
+    );
+    CREATE TABLE audits (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      call_id INTEGER UNIQUE,
+      trade_id INTEGER,
+      q1 TEXT, q1_flag TEXT, q1_evidence TEXT, q1_confidence REAL, q1_speaker TEXT,
+      q2 TEXT, q2_flag TEXT, q2_evidence TEXT, q2_confidence REAL, q2_speaker TEXT,
+      q3 TEXT, q3_flag TEXT, q3_evidence TEXT, q3_confidence REAL, q3_speaker TEXT,
+      q4 TEXT, q4_flag TEXT, q4_evidence TEXT, q4_confidence REAL, q4_speaker TEXT,
+      q5 TEXT, q5_flag TEXT, q5_evidence TEXT, q5_confidence REAL, q5_speaker TEXT,
+      score INTEGER,
+      audit_comment TEXT,
+      compliance_disposition TEXT,
+      status TEXT,
+      model TEXT,
+      created_at TEXT,
+      updated_at TEXT
+    );
+    CREATE TABLE scorecards (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      audit_id INTEGER,
+      call_id INTEGER UNIQUE,
+      caller_name TEXT,
+      dealer TEXT,
+      team TEXT,
+      client TEXT,
+      client_code TEXT,
+      resolved_trade_id INTEGER,
+      trade_phone TEXT,
+      calling_number TEXT,
+      registered_number TEXT,
+      trade_date TEXT,
+      call_date TEXT,
+      score INTEGER,
+      is_fatal INTEGER,
+      fatal_reasons TEXT,
+      q1_status TEXT, q1_evidence TEXT,
+      q2_status TEXT, q2_evidence TEXT,
+      q3_status TEXT, q3_evidence TEXT,
+      q4_status TEXT, q4_evidence TEXT,
+      q5_status TEXT, q5_evidence TEXT,
+      audit_comment TEXT,
+      generated_at TEXT,
+      created_at TEXT,
+      updated_at TEXT
+    );
+  `);
+  return memDb;
+}
+
+await runTest('Test GG: Kajaria Call Regression Test (Noisy ASR, SELL/EXIT order, Trade correlation & Audit completion)', async () => {
+  const memDb = createTestPipelineDb();
+
+  // 1. Setup client master and executed trade for Kajaria Ceramics exit
+  memDb.prepare(`
+    INSERT INTO clients (client_code, name, phone)
+    VALUES ('WIA12345', 'Anil Sharma', '9811122334')
+  `).run();
+
+  memDb.prepare(`
+    INSERT INTO trades (id, client, client_code, client_number, phone_number, symbol, order_type, quantity, price, trade_date, trade_time, advisor_name)
+    VALUES (501, 'WIA12345', 'WIA12345', '9811122334', '9811122334', 'KAJARIACER', 'SELL', 50, 1250.0, '2026-09-12', '11:15:00', 'Priya Patel')
+  `).run();
+
+  // 2. Insert call with noisy ASR containing Whisper hallucination artifact at the end
+  const rawHallucinatedTranscript = `Advisor: Good morning Mr. Sharma, this is Priya calling from FundsIndia equity desk. Confirming account WIA12345.
+Client: Haan Priya ji, ek urgent instruction hai. Kajaria Ceramics mein se exit maar do 50 shares CMP pe immediately please.
+Advisor: Understood sir. Placing sell order for 50 shares of Kajaria Ceramics at CMP right now.
+Client: Haan bilkul confirm hai, execute kar do.
+[Music] Subtitles by the Amara.org community. Thank you for watching!`;
+
+  const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
+  const ins = memDb.prepare(`
+    INSERT INTO calls (
+      recording_id, client_code, calling_number, registered_number, duration_seconds,
+      transcript, transcript_raw, transcript_status, advisor_name, call_date, call_time,
+      status, audit_status, processing_status, created_at, updated_at
+    ) VALUES (
+      'REC_KAJARIA_001', 'WIA12345', '9811122334', '9811122334', 42.5,
+      ?, ?, 'VALID', 'Priya Patel', '2026-09-12', '11:14:00',
+      'uploaded', 'PENDING', 'IDLE', ?, ?
+    )
+  `).run(rawHallucinatedTranscript, rawHallucinatedTranscript, now, now);
+
+  const kajariaCallId = Number(ins.lastInsertRowid);
+
+  // 3. Execute the full end-to-end 9-stage pipeline for this call
+  await runFullPipelineForCall(memDb, kajariaCallId, 'test_groq_key', 'test_gemini_key');
+
+  // 4. Verify Requirement 1: Raw ASR preservation despite hallucinations
+  const callRecord = memDb.prepare('SELECT * FROM calls WHERE id = ?').get(kajariaCallId) as any;
+  assert.ok(callRecord, 'Kajaria call must exist in database');
+  assert.strictEqual(
+    callRecord.transcript_raw,
+    rawHallucinatedTranscript,
+    'Raw ASR transcript with hallucinations must be strictly preserved without alteration'
+  );
+
+  // 5. Verify Requirement 2: Actionable SELL/EXIT order identification
+  const callOrders = memDb.prepare('SELECT * FROM call_orders WHERE call_id = ?').all(kajariaCallId) as any[];
+  assert.ok(callOrders.length >= 1, 'At least 1 order must be extracted from the call');
+  const sellOrder = callOrders.find((o) => o.intent_type === 'SELL');
+  assert.ok(sellOrder, 'An actionable SELL/EXIT order must be identified');
+  assert.strictEqual(sellOrder.intent_type, 'SELL', 'Order intent must be SELL');
+  assert.ok(sellOrder.symbol === 'KAJARIACER' || sellOrder.symbol === 'KAJARIA', 'Order symbol must resolve to KAJARIACER or KAJARIA alias');
+  assert.strictEqual(sellOrder.quantity, 50, 'Order quantity must be 50 shares');
+  assert.strictEqual(sellOrder.price_type, 'CMP', 'Order price type must be CMP');
+
+  // 6. Verify Requirement 3: Successful correlation to the real execution
+  const orderExecs = memDb.prepare('SELECT * FROM order_executions WHERE order_id = ?').all(sellOrder.id) as any[];
+  assert.ok(orderExecs.length >= 1, 'Order must correlate to an executed trade');
+  assert.strictEqual(orderExecs[0].trade_id, 501, 'Execution must link to Trade #501');
+  assert.strictEqual(orderExecs[0].matched_quantity, 50, 'Matched execution quantity must be 50');
+
+  // 7. Verify Requirement 4: Full completion without stopping after transcription
+  assert.strictEqual(callRecord.classification, 'PRE_ORDER', 'Call must be classified as PRE_ORDER');
+  assert.strictEqual(callRecord.audit_status, 'AUDITED', 'Audit status must be AUDITED');
+  assert.strictEqual(callRecord.status, 'audited', 'Call status must reach terminal state audited');
+  assert.strictEqual(callRecord.processing_status, 'COMPLETED', 'Processing status must be COMPLETED');
+
+  // Verify scorecard persistence
+  const scorecard = memDb.prepare('SELECT * FROM scorecards WHERE call_id = ?').get(kajariaCallId) as any;
+  assert.ok(scorecard, 'Scorecard must be generated and persisted for Kajaria call');
+  const numericScore = scorecard.score ?? scorecard.total_score;
+  assert.ok(numericScore >= 4, `Compliance score must be high (was ${numericScore})`);
+});
+
+await runTest('Test HH: Order Intent with Missing Trade Execution Finalizes as REGULAR and Safely Excludes from Audit', async () => {
+  const memDb = createTestPipelineDb();
+  const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
+
+  // Register client in master table
+  memDb.prepare(`
+    INSERT INTO clients (client_code, name, phone, email)
+    VALUES ('WIA99999', 'Rahul Sharma', '9899988877', 'rahul@example.com')
+  `).run();
+
+  // Note: NO trades are inserted into trades table for Rahul Sharma!
+  // This simulates an order discussed/attempted verbally where no execution is recorded in the trade book.
+
+  const orderTranscript = `Advisor: Good morning Rahul ji, this is Priya from FundsIndia. Client code WIA99999 right?
+Client: Yes Priya, my code is WIA99999.
+Advisor: Great. What would you like to execute today?
+Client: Please buy 100 shares of Reliance at current market price.
+Advisor: Understood, buying 100 shares of Reliance Industries at CMP. Will you get 20% profit on this?
+Advisor: Rahul ji, equity investments are subject to market risks, we cannot promise any fixed return. Shall I punch the order?
+Client: Yes, please go ahead and punch it.`;
+
+  const ins = memDb.prepare(`
+    INSERT INTO calls (
+      recording_id, client_code, calling_number, registered_number, duration_seconds,
+      transcript, transcript_raw, transcript_status, advisor_name, call_date, call_time,
+      status, audit_status, processing_status, created_at, updated_at
+    ) VALUES (
+      'REC_UNMATCHED_001', 'WIA99999', '9899988877', '9899988877', 38.0,
+      ?, ?, 'VALID', 'Priya Patel', '2026-09-12', '14:20:00',
+      'uploaded', 'PENDING', 'IDLE', ?, ?
+    )
+  `).run(orderTranscript, orderTranscript, now, now);
+
+  const callId = Number(ins.lastInsertRowid);
+
+  // Run full pipeline
+  await runFullPipelineForCall(memDb, callId);
+
+  // Verify call record:
+  // Under the Execution-Based Gate: Actionable speech + no trade = REGULAR (NO_MATCH -> safely excluded from audit)
+  const callRecord = memDb.prepare('SELECT * FROM calls WHERE id = ?').get(callId) as any;
+  assert.ok(callRecord, 'Call record must exist');
+  assert.strictEqual(callRecord.classification, 'REGULAR', 'Order intent without confirmed executed trade must finalize as REGULAR');
+  assert.strictEqual(callRecord.trade_match_status, 'NO_MATCH', 'Trade match status must be NO_MATCH');
+  assert.strictEqual(callRecord.status, 'regular', 'Call status must be regular');
+  assert.strictEqual(callRecord.audit_status, 'EXCLUDED', 'Call must be safely EXCLUDED from audit');
+  assert.strictEqual(callRecord.processing_status, 'COMPLETED', 'Processing status must be COMPLETED');
+  assert.strictEqual(callRecord.pipeline_stage, 'REGULAR_EXIT', 'Pipeline stage must terminate at REGULAR_EXIT');
+
+  // Verify NO audit or scorecard was generated (audit engine must not be invoked)
+  const audit = memDb.prepare('SELECT * FROM audits WHERE call_id = ?').get(callId) as any;
+  assert.strictEqual(audit, undefined, 'Audit record must NOT exist for regular unexecuted call');
+
+  const scorecard = memDb.prepare('SELECT * FROM scorecards WHERE call_id = ?').get(callId) as any;
+  assert.strictEqual(scorecard, undefined, 'Scorecard must NOT exist for regular unexecuted call');
+});
+
+await runTest('Test II: Classification Nuances — Historical Orders, Contextual Go-Ahead, Questions & Recommendations', async () => {
+  // 1. Historical order: "The order was executed yesterday" -> REGULAR
+  const c1 = classifyCallIntent('Client: Hello, the order was executed yesterday. Can you send the contract note?', 40);
+  assert.strictEqual(c1.call_type, 'regular', 'Historical order execution must be classified as regular');
+
+  // 2. Status inquiry: "Did my order go through? Check whether it was executed." -> REGULAR
+  const c2 = classifyCallIntent('Client: Did my order go through? Please check whether it was executed earlier.', 35);
+  assert.strictEqual(c2.call_type, 'regular', 'Order status inquiry must be classified as regular');
+
+  // 3. Contextual "go ahead": "We discussed the Reliance order yesterday. Go ahead and check whether it was executed." -> REGULAR
+  const c3 = classifyCallIntent('Client: We discussed the Reliance order yesterday. Go ahead and check whether it was executed.', 45);
+  assert.strictEqual(c3.call_type, 'regular', 'Go ahead to check/verify status must be classified as regular');
+
+  // 4. Client question: "Should we exit Reliance?" / "Should I buy Reliance?" -> REGULAR
+  const c4 = classifyCallIntent('Client: Should we exit Reliance today? What do you think?', 30);
+  assert.strictEqual(c4.call_type, 'regular', 'Question asking whether to exit must be classified as regular');
+
+  const c5 = classifyCallIntent('Client: Should I buy 100 shares of Reliance at current levels?', 30);
+  assert.strictEqual(c5.call_type, 'regular', 'Question asking whether to buy must be classified as regular');
+
+  // 5. Advisor recommendation: "Analyst recommended exiting Reliance" / "We recommend buying Reliance" -> REGULAR
+  const c6 = classifyCallIntent('Advisor: Analyst recommended exiting Reliance and holding cash. What is your view?', 40);
+  assert.strictEqual(c6.call_type, 'regular', 'Analyst recommendation to exit must be classified as regular');
+
+  // 6. Actionable exit directive: "Please exit Reliance now at CMP" -> PRE_ORDER intent
+  const c7 = classifyCallIntent('Client: Please exit Reliance now at CMP. Advisor: Okay, squaring off position at market price.', 35);
+  assert.strictEqual(c7.call_type, 'pre_order', 'Direct imperative to exit position at CMP must have pre_order intent');
 });
 
 console.log('===========================================================');

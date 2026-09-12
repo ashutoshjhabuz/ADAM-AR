@@ -106,14 +106,10 @@ export function verifyAuditEligibility(
     };
   }
 
-  // Gate 5: Exact trade must exist
-  if (!trade || !trade.id) {
-    return {
-      eligible: false,
-      reason: 'Missing exact trade match. Pre-order calls cannot be audited without a verified trade match.',
-      gateCode: 'NO_EXACT_TRADE',
-    };
-  }
+  // Gate 5: Exact trade check (SEBI decoupled compliance mandate)
+  // Even if no executed trade is matched, genuine pre-order conversations
+  // MUST be audited for compliance parameters.
+  // Trade execution absence does NOT disqualify pre-order compliance audit.
 
   return {
     eligible: true,

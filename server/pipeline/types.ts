@@ -7,7 +7,7 @@ export type IdentitySource = 'METADATA' | 'FILENAME' | 'TRADE_EXACT' | 'MANUAL';
 
 export type TranscriptStatus = 'PENDING' | 'VALID' | 'FAILED';
 
-export type CallClassification = 'PENDING' | 'PRE_ORDER' | 'REGULAR' | 'SCRAP' | 'REVIEW';
+export type CallClassification = 'PENDING' | 'ORDER_INTENT' | 'PRE_ORDER' | 'REGULAR' | 'SCRAP' | 'REVIEW';
 
 export type TradeMatchStatus = 'PENDING' | 'CONFIRMED' | 'REVIEW' | 'NO_MATCH';
 
@@ -95,14 +95,14 @@ export interface StageAuditResult {
   q1: AuditQuestionResult;
   q2: AuditQuestionResult;
   q3: AuditQuestionResult;
-  q4?: AuditQuestionResult;
-  q5: AuditQuestionResult;
+  q4: AuditQuestionResult;
+  q5?: AuditQuestionResult;
   model: string;
 }
 
 export interface StageScoreResult {
   score: number; // 0 to 5
-  max_score: 5;
+  max_score: 4 | 5;
   is_fatal: boolean;
   fatal_reasons: string[];
   review_reasons: string[];

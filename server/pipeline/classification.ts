@@ -5,8 +5,8 @@
 //
 // Core Mandates:
 // 1. Scrap Call:
-//    - All calls <= 6s duration are SCRAP.
-//    - Calls >= 7s duration are NOT SCRAP by duration alone.
+//    - All calls < 6s duration are SCRAP.
+//    - Calls >= 6s duration are NOT SCRAP by duration alone (eligible for transcription).
 //    - Silent, empty, or automated voicemail/carrier disconnects are SCRAP.
 // 2. Pre-Order Call:
 //    - The core question: Was an actionable order instruction given for immediate execution?
@@ -24,6 +24,7 @@ import type {
   ClassificationResult,
   ClassificationEvidence,
   TranscriptSegment,
+  CallClassification,
 } from './types';
 import type { CallRecord } from '../../src/types';
 import {
@@ -92,7 +93,9 @@ export async function stage4ClassifyCall(
   }
 
   // 3. Map to Stage Classification Types
-  let stageClassification: 'PRE_ORDER' | 'REGULAR' | 'SCRAP' | 'REVIEW' = 'REGULAR';
+  // Stage 4 establishes call classification directly from spoken dialogue.
+  // When order intent is spoken, the call IS a PRE_ORDER call.
+  let stageClassification: CallClassification = 'REGULAR';
   if (aiResult.call_type === 'pre_order') {
     stageClassification = 'PRE_ORDER';
   } else if (aiResult.call_type === 'scrap') {
@@ -103,30 +106,36 @@ export async function stage4ClassifyCall(
     stageClassification = 'REGULAR';
   }
 
-  // 4. Evidence Validation
+  // 4. Evidence Validation: Strict verification against transcript segments
   const validEv = validateEvidenceInTranscript(aiResult.evidence, transcript);
   const matchedSegment = segments.find((s) =>
     s.text.toLowerCase().includes(validEv.normalizedEvidence.slice(0, 30).toLowerCase())
   );
 
   const evidenceList: ClassificationEvidence[] = [];
-  if (aiResult.evidence && validEv.isValid) {
+  let classificationReason = aiResult.reason;
+
+  if (aiResult.evidence && validEv.isValid && matchedSegment) {
     evidenceList.push({
-      segment_id: matchedSegment?.segment_id || 'seg_1',
-      start: matchedSegment?.start_time || 0,
-      end: matchedSegment?.end_time || 5,
+      segment_id: matchedSegment.segment_id,
+      start: matchedSegment.start_time,
+      end: matchedSegment.end_time,
       speaker: (aiResult.evidence_speaker === 'CLIENT' || aiResult.evidence_speaker === 'ADVISOR')
         ? aiResult.evidence_speaker
         : 'ADVISOR',
       text: aiResult.evidence,
     });
+  } else if (stageClassification === 'PRE_ORDER' && (!validEv.isValid || !matchedSegment)) {
+    // If order intent was claimed but cannot be found in verbatim transcript segments, route to REVIEW
+    stageClassification = 'REVIEW';
+    classificationReason = 'Order intent evidence text could not be verified in audio segments; routed to compliance REVIEW.';
   }
 
   const result: ClassificationResult = {
     classification: stageClassification,
-    confidence: aiResult.confidence,
+    confidence: stageClassification === 'REVIEW' ? 0.7 : aiResult.confidence,
     evidence: evidenceList,
-    reason: aiResult.reason,
+    reason: classificationReason,
     model: aiResult.model_used || 'authoritative-intent-classifier',
   };
 
@@ -142,28 +151,49 @@ function persistClassification(
   const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
   const primaryEvidence = res.evidence[0];
 
-  db.prepare(`
-    UPDATE calls SET
-      classification = ?,
-      classification_confidence = ?,
-      classification_evidence = ?,
-      preorder_confidence = ?,
-      preorder_evidence = ?,
-      preorder_speaker = ?,
-      preorder_timestamp = ?,
-      scrap_reason = ?,
-      updated_at = ?
-    WHERE id = ?
-  `).run(
-    res.classification,
-    res.confidence,
-    primaryEvidence?.text || res.reason,
-    res.confidence,
-    primaryEvidence?.text || res.reason,
-    primaryEvidence?.speaker || null,
-    primaryEvidence ? `${primaryEvidence.start}s` : null,
-    res.scrap_reason || null,
-    now,
-    callId
-  );
+  try {
+    db.prepare(`
+      UPDATE calls SET
+        classification = ?,
+        classification_confidence = ?,
+        classification_evidence = ?,
+        preorder_confidence = ?,
+        preorder_evidence = ?,
+        preorder_speaker = ?,
+        preorder_timestamp = ?,
+        scrap_reason = ?,
+        updated_at = ?
+      WHERE id = ?
+    `).run(
+      res.classification,
+      res.confidence,
+      primaryEvidence?.text || res.reason,
+      res.confidence,
+      primaryEvidence?.text || res.reason,
+      primaryEvidence?.speaker || null,
+      primaryEvidence ? `${primaryEvidence.start}s` : null,
+      res.scrap_reason || null,
+      now,
+      callId
+    );
+  } catch (err: any) {
+    if (err.message && err.message.includes('no such column')) {
+      db.prepare(`
+        UPDATE calls SET
+          classification = ?,
+          preorder_confidence = ?,
+          preorder_evidence = ?,
+          updated_at = ?
+        WHERE id = ?
+      `).run(
+        res.classification,
+        res.confidence,
+        primaryEvidence?.text || res.reason,
+        now,
+        callId
+      );
+    } else {
+      throw err;
+    }
+  }
 }

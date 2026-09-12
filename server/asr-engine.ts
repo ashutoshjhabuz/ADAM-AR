@@ -433,7 +433,7 @@ export async function transcribeAudioFile(
   if (!primaryText) {
     throw new Error(
       `Audio transcription failed for "${filename}". ` +
-      `Ensure GEMINI_API_KEY is configured on the server.`
+      `Ensure GEMINI_API_KEY or GROQ_API_KEY is configured on the server.`
     );
   }
 
