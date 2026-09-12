@@ -3713,7 +3713,7 @@ ${call.transcript || '(No speech transcript recorded)'}
 
       // STAGE 7: AUDIT
       const auditResult = await stage7AuditCall(sqlite, callId, getGroqKey());
-      // STAGE 8: SCORING (Max 5, fatal -> 0, non-fatal -> 4)
+      // STAGE 8: SCORING (Max 4, fatal -> 0, non-fatal -> 3)
       const scoreResult = stage8CalculateScore(auditResult);
       // STAGE 9: PUBLISH
       const published = stage9PublishAudit(sqlite, callId, auditResult, scoreResult);
@@ -3721,7 +3721,7 @@ ${call.transcript || '(No speech transcript recorded)'}
       const audit = sqlite.prepare('SELECT * FROM audits WHERE id = ?').get(published.audit_id);
       const scorecard = sqlite.prepare('SELECT * FROM scorecards WHERE id = ?').get(published.scorecard_id);
 
-      addLog('info', 'FORCE_AUDIT_SUCCESS', `Call #${callId} audited via isolated stages. Score: ${scoreResult.score}/5.`);
+      addLog('info', 'FORCE_AUDIT_SUCCESS', `Call #${callId} audited via isolated stages. Score: ${scoreResult.score}/4.`);
       return res.json({ ok: true, audit, scorecard, scoreResult });
     } catch (err: unknown) {
       return res.status(500).json({ ok: false, error: (err as Error).message });

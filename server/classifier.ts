@@ -163,51 +163,11 @@ export function classifyCallIntent(
 
   const text = (transcript || '').toLowerCase();
 
-  // 1. Question Patterns (Client seeking advisory opinions or asking whether to trade)
-  const questionPatterns = [
-    /\b(?:should\s+i|should\s+we|can\s+i|shall\s+i|can\s+we|kya\s+hum|kya\s+main)\s+(?:buy|sell|purchase|exit|square\s*off)\b/i,
-    /\b(?:what\s+do\s+you\s+think\s+about\s+(?:buying|selling|exiting))\b/i,
-    /\b(?:kya\s+(?:buy|sell|kharid|exit)\s+karna\s+chahiye)\b/i,
-    /\b(?:is\s+it\s+(?:a\s+good\s+time|good)\s+to\s+(?:buy|sell|exit))\b/i,
-    /\b(?:shall\s+we\s+wait|should\s+we\s+wait|holding\s+better)\b/i,
-  ];
-
-  // 2. Recommendation / Advisory Patterns (Advisor providing recommendations, views, or research calls)
-  const marketDiscussionPatterns = [
-    /\bmarket\s+(?:view|update|trend|outlook|sentiment)\b/i,
-    /\bwhat\s+is\s+your\s+view\s+on\b/i,
-    /\b(?:research\s+report|recommendation\s+only|research\s+call)\b/i,
-    /\b(?:we\s+recommend|our\s+recommendation|analyst\s+recommends?|analyst\s+recommended\s+exiting)\b/i,
-    /\b(?:we\s+gave\s+a\s+buy\s+call|we\s+have\s+a\s+buy\s+call|our\s+call\s+is\s+buy)\b/i,
-    /\b(?:you\s+can\s+buy|you\s+can\s+sell|you\s+may\s+consider\s+(?:buying|selling))\b/i,
-    /\b(?:target\s+price|stop\s+loss|call\s+given\s+by)\b/i,
-    /\b(?:don'?t|do\s+not)\s+sell\s+(?:your\s+)?(?:shares|holding)\b/i,
-    /\bholding\s+(?:for\s+long\s+term|mat\s+becho)\b/i,
-    /\b(?:contract\s+note|ledger\s+statement|portfolio\s+balance|payout|payin|funds?\s+transfer)\b/i,
-    /\b(?:login\s+issue|password\s+reset|app\s+(?:not\s+working|issue)|kyc\s+update)\b/i,
-    /\bcalling\s+to\s+follow\s+up\b/i,
-  ];
-
-  // 3. Historical / Past Order Execution Discussion (Past trades or order status queries)
-  const historicalOrderPatterns = [
-    /\b(?:the\s+)?order\s+was\s+(?:executed|punched|placed|filled)\b/i,
-    /\b(?:already\s+(?:placed|executed|punched|bought|sold|exited))\b/i,
-    /\b(?:we\s+already\s+placed\s+the\s+order)\b/i,
-    /\b(?:bought\s+yesterday|sold\s+yesterday|exited\s+yesterday|placed\s+yesterday|punched\s+yesterday)\b/i,
-    /\b(?:yesterday|earlier|in\s+the\s+morning|last\s+week)\b[\s\S]{0,35}\b(?:order|bought|sold|placed|punched|exited)\b/i,
-    /\b(?:order\s+was\s+(?:placed|executed|punched)|executed\s+in\s+the\s+morning|placed\s+earlier)\b/i,
-    /\b(?:kal\s+(?:liya|becha|daala|lagaya)\s+tha|subah\s+(?:liya|becha|daala)\s+tha|pehle\s+hi\s+(?:daal|punch|kar)\s+diya)\b/i,
-    /\b(?:order\s+lag\s+gaya\s+tha|order\s+execute\s+ho\s+gaya\s+tha)\b/i,
-    /\b(?:did\s+my\s+order\s+(?:go\s+through|execute|punch))\b/i,
-    /\b(?:check\s+(?:whether|if)\s+(?:it|the\s+order)\s+(?:was|is)\s+(?:executed|placed|punched))\b/i,
-    /\b(?:go\s+ahead\s+and\s+check\b)/i,
-    /\b(?:check\s+(?:on\s+)?(?:order|trade)\s+status|order\s+status\s+kya\s+hai)\b/i,
-  ];
-
-  // 4. Actionable Current Order Intent Patterns (Clear immediate directives or mutual agreement to trade right now)
+  // Actionable Order Intent Patterns (Phrases indicating an immediate instruction or agreement to execute a trade)
   const actionableOrderPatterns = [
     /\b(?:we\s+are|i\s+am)\s+(?:buying|selling|purchasing)\s+(?:on\s+your\s+behalf|for\s+you|for\s+your\s+account)\b/i,
     /\b(?:aapke\s+behalf\s+pe|aapke\s+account\s+mein)\s+(?:buy|sell|kharid|bech|punch)\b/i,
+    /\b(?:shall\s+we|can\s+we|shall\s+i|can\s+i)\s+(?:buy|sell|purchase|exit)\b/i,
     /\b(?:buying|selling)\s+\d+\s+(?:shares?|lots?|qty)?\s*(?:of\s+)?[a-z0-9&]+\s*(?:for\s+you|on\s+your\s+behalf)?\b/i,
     /\b(?:we\s+are\s+punching|we\s+are\s+placing)\s+(?:the\s+)?order\b/i,
     /\b(?:hum\s+order\s+daal\s+rahe\s+hain|hum\s+punch\s+kar\s+rahe\s+hain|order\s+execute\s+kar\s+rahe\s+hain)\b/i,
@@ -219,16 +179,35 @@ export function classifyCallIntent(
     /\b(?:buy|buying|purchase)\s+\d+\s+[a-z0-9&]+\b/i,
     /\bconfirming\s+(?:the\s+)?(?:buy|sell|order)\s+(?:for|of)\b/i,
     /\b(?:shall\s+i|can\s+i)\s+(?:execute|place|punch)\s+(?:the\s+)?order\b/i,
+    /\border\s+(?:has\s+been\s+)?(?:executed|punched|placed|confirmed)\b/i,
     /\bbhav\s+pe\s+(?:le\s+lo|bech\s+do|kharid\s+lo)\b/i,
     /\b(?:buy|buying|sell|selling)\s+\d+\s+(?:shares?|lots?|qty)\s+(?:of\s+)?[a-z0-9]+\b/i,
-    // Exit / square off with imperative context (not questions or historical)
-    /\b(?:please\s+)?(?:exit|square\s*off)\s+(?:the\s+position|position|all\s+shares?|now\b|at\s+market|at\s+cmp|\d+\s+shares?)\b/i,
-    /\b(?:please\s+)?(?:exit|square\s*off)\s+[a-z0-9&]+\s+(?:now\b|at\s+cmp|at\s+market|\d+\s+shares?)\b/i,
-    /\b(?:please\s+)?(?:sell|exit)\s+[a-z0-9&]+\s+(?:at\s+cmp|now\b|\d+\s+shares?)\b/i,
+    /\b(?:exit|square\s*off)\s+(?:the\s+position|position|all\s+shares?|from)?\b/i,
+    /\b(?:exit|sell|bech\s+do|square\s*off)\s+(?:\d+\s+)?(?:shares?\s+(?:of\s+)?)?[a-z0-9&]+\b/i,
+    /\b(?:please\s+)?(?:sell|exit)\s+[a-z0-9&]+\b/i,
     /\b(?:le\s+lo|bech\s+do|kharid\s+lo|punch\s+kar\s+do|dal\s+do|daal\s+do)\b/i,
-    // Contextual "go ahead": authorization to execute/punch (not followed by inquiry verbs like check/see/verify)
-    /\bgo\s+ahead\s+(?:and\s+)?(?:punch|place|execute|buy|sell)\b/i,
-    /\b(?:shall\s+i|can\s+i|should\s+i|are\s+we)\s+(?:punch|place|execute|buying|selling)\b[\s\S]{0,80}\b(?:yes|haan|sure|okay)?\s*(?:please\s+)?go\s+ahead\b/i,
+    /(?:(?:order|buy|sell|purchase|shares?|trade|punch|bhav|cmp)\b[\s\S]{0,60}\bgo\s+ahead\b|\bgo\s+ahead\b[\s\S]{0,60}\b(?:order|buy|sell|purchase|shares?|trade|punch|bhav|cmp|execute)\b)/i,
+  ];
+
+  // Pure Discussion / Advisory / Non-actionable Inquiry Patterns
+  const marketDiscussionPatterns = [
+    /\bmarket\s+(?:view|update|trend|outlook|sentiment)\b/i,
+    /\bwhat\s+is\s+your\s+view\s+on\b/i,
+    /\b(?:research\s+report|recommendation\s+only)\b/i,
+    /\b(?:don'?t|do\s+not)\s+sell\s+(?:your\s+)?(?:shares|holding)\b/i,
+    /\bholding\s+(?:for\s+long\s+term|mat\s+becho)\b/i,
+    /\b(?:contract\s+note|ledger\s+statement|portfolio\s+balance|payout|payin|funds?\s+transfer)\b/i,
+    /\b(?:login\s+issue|password\s+reset|app\s+(?:not\s+working|issue)|kyc\s+update)\b/i,
+    /\bcalling\s+to\s+follow\s+up\b/i,
+    /\b(?:we\s+recommend|our\s+recommendation|research\s+call|target\s+price|stop\s+loss\s+hit)\b/i,
+  ];
+
+  // Historical / Past Order Execution Discussion (NOT an order for this session)
+  const historicalOrderPatterns = [
+    /\b(?:bought\s+yesterday|sold\s+yesterday|already\s+bought|already\s+sold|already\s+placed)\b/i,
+    /\b(?:order\s+was\s+(?:placed|executed|punched)|executed\s+in\s+the\s+morning|placed\s+earlier)\b/i,
+    /\b(?:kal\s+liya\s+tha|subah\s+liya\s+tha|pehle\s+hi\s+daal\s+diya|order\s+lag\s+gaya\s+tha)\b/i,
+    /\b(?:did\s+my\s+order\s+go\s+through|check\s+order\s+status|order\s+status\s+kya\s+hai)\b/i,
   ];
 
   let hasActionableOrder = false;
@@ -238,17 +217,6 @@ export function classifyCallIntent(
     if (match) {
       hasActionableOrder = true;
       orderEvidence = match[0];
-      break;
-    }
-  }
-
-  let hasQuestionOnly = false;
-  let questionEvidence = '';
-  for (const p of questionPatterns) {
-    const match = text.match(p);
-    if (match) {
-      hasQuestionOnly = true;
-      questionEvidence = match[0];
       break;
     }
   }
@@ -275,46 +243,16 @@ export function classifyCallIntent(
     }
   }
 
-  // Contextual "go ahead" guard: If "go ahead" was paired with inquiry verbs like check/see/verify/cancel
-  if (hasActionableOrder && /\bgo\s+ahead\b/i.test(orderEvidence)) {
-    if (/\bgo\s+ahead\s+(?:and\s+)?(?:check|see|verify|find\s+out|look|cancel|inquire|tell|ask|mail|send)\b/i.test(text)) {
-      hasActionableOrder = false;
-      orderEvidence = '';
-      hasHistoricalOnly = true;
-      if (!historicalEvidence) historicalEvidence = 'go ahead and check';
-    }
-  }
+  // Check semantic grounding: An actionable pre-order requires order directive with security or action context
+  // NOTE: The legacy 4-of-5 arbitrary parameter check has been COMPLETELY REMOVED per SEBI compliance mandate.
+  // Pre-order requires genuine immediate execution intent, not a keyword count.
 
-  // Definite execution directive check: if a question or recommendation is present, only treat as actionable
-  // if an explicit directive to execute/punch/place was confirmed in the dialogue.
-  const definiteDirectivePatterns = [
-    /\b(?:please\s+)?(?:place|punch|execute|put)\s+(?:an?|the)?\s*(?:buy|sell)?\s*order\b/i,
-    /\b(?:order\s+(?:laga|daal|punch|place|execute)\s*(?:do|dijiye|karo|rahe\s*hain))\b/i,
-    /\bgo\s+ahead\s+(?:and\s+)?(?:punch|place|execute|buy|sell)\b/i,
-    /\bconfirming\s+(?:the\s+)?(?:buy|sell|order)\s+(?:for|of)\b/i,
-    /\b(?:we\s+are\s+punching|we\s+are\s+placing)\s+(?:the\s+)?order\b/i,
-    /\b(?:punch\s+kar\s+do|dal\s+do|daal\s+do|kharid\s+lo|bech\s+do)\b/i,
-    /\b(?:please\s+)?(?:exit|square\s*off)\s+(?:now\b|at\s+market|at\s+cmp|\d+\s+shares?)\b/i,
-    /\b(?:please\s+)?(?:exit|square\s*off)\s+[a-z0-9&]+\s+(?:now\b|at\s+cmp|at\s+market|\d+\s+shares?)\b/i,
-  ];
-  const hasDefiniteDirective = definiteDirectivePatterns.some((p) => p.test(text));
-
-  // If question was asked (e.g. "Should I buy 100 shares?", "Should we exit?"), without an execution directive -> not actionable
-  if (hasQuestionOnly && !hasDefiniteDirective) {
-    hasActionableOrder = false;
-  }
-
-  // If advisor gave recommendation (e.g. "Analyst recommended exiting", "We recommend buying"), without an execution directive -> not actionable
-  if (hasDiscussionOnly && !hasDefiniteDirective && (text.includes('recommend') || text.includes('view') || text.includes('report'))) {
-    hasActionableOrder = false;
-  }
-
-  // 1. If past order inquiry or historical status discussion without current actionable trade placement -> REGULAR
-  if (hasHistoricalOnly && (!hasActionableOrder || text.includes('yesterday') || text.includes('already') || text.includes('earlier'))) {
+  // 1. If past order inquiry without new immediate order directive -> REGULAR
+  if (hasHistoricalOnly && !hasActionableOrder) {
     return {
       call_type: 'regular',
       confidence: 0.95,
-      evidence: historicalEvidence || 'historical order status inquiry',
+      evidence: historicalEvidence,
       evidence_speaker: 'CLIENT',
       evidence_timestamp: '00:00:10',
       reason: 'Historical order status inquiry without current actionable trade placement.',
@@ -323,21 +261,7 @@ export function classifyCallIntent(
     };
   }
 
-  // 2. Questions / advisory queries without immediate execution directive -> REGULAR
-  if (hasQuestionOnly && !hasActionableOrder) {
-    return {
-      call_type: 'regular',
-      confidence: 0.94,
-      evidence: questionEvidence,
-      evidence_speaker: 'CLIENT',
-      evidence_timestamp: '00:00:10',
-      reason: 'Client inquiry / advisory question seeking opinion rather than direct execution mandate.',
-      model_used: 'semantic-rules-v18',
-      prompt_version: 'v18.0.0',
-    };
-  }
-
-  // 3. Pure market discussion/advisory without immediate order directive -> REGULAR
+  // 2. Pure market discussion/advisory without immediate order directive -> REGULAR
   if (hasDiscussionOnly && !hasActionableOrder) {
     return {
       call_type: 'regular',

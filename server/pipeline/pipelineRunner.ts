@@ -298,10 +298,7 @@ export async function runFullPipelineForCall(
       stage2ResolveIdentity(db, callId);
     }
 
-    // FINAL CLASSIFICATION DECISION (Authoritative State Machine)
-    // PRE_ORDER: Actionable order + Confirmed validated trade execution -> AUDIT
-    // REGULAR: No qualifying trade execution found (or wrong stock / wrong side / wrong client) -> NO AUDIT
-    // REVIEW: Ambiguous trade correlation / parameter variance -> REVIEW WORKFLOW (NO AUDIT)
+    // FINAL CLASSIFICATION DECISION (Items 1 to 15, 139 to 152)
     if (matchResult.status === 'CONFIRMED') {
       // Confirmed executed trade correlation verified
       db.prepare(`
@@ -314,7 +311,7 @@ export async function runFullPipelineForCall(
           classification_reason = ?,
           pipeline_stage = 'TRADE_MATCHING',
           current_gate = 'GATE_5',
-          gate_reason = 'Executed trade confirmed and correlated to spoken order.',
+          gate_reason = 'Executed trade confirmed and correlated.',
           updated_at = ?
         WHERE id = ?
       `).run(
@@ -324,72 +321,45 @@ export async function runFullPipelineForCall(
         callId
       );
     } else if (matchResult.status === 'NO_MATCH') {
-      // Order was spoken in call, but NO matching trade execution was recorded in the trade book.
-      // Regulatory rule: An order without an executed trade is a REGULAR call (non-executed inquiry) and is NOT audited.
+      // Order was spoken in call, but execution record not found.
+      // Architectural rule: Execution correlation failure must NOT erase compliance audit.
       db.prepare(`
         UPDATE calls SET
-          classification = 'REGULAR',
-          call_type = 'regular',
-          status = 'regular',
-          audit_status = 'EXCLUDED',
-          processing_status = 'COMPLETED',
+          classification = 'PRE_ORDER',
+          call_type = 'pre_order',
           trade_match_status = 'NO_MATCH',
-          matched_trade_id = NULL,
           classification_reason = ?,
-          pipeline_stage = 'REGULAR_EXIT',
+          pipeline_stage = 'TRADE_MATCHING',
           current_gate = 'GATE_5',
-          gate_reason = 'Order discussed/attempted, but no corresponding executed trade found in trade book. Classified as REGULAR and excluded from pre-order compliance audit.',
+          gate_reason = 'Execution trade record not found; proceeding to spoken dialogue compliance audit.',
           updated_at = ?
         WHERE id = ?
       `).run(
-        `Spoken order instruction has no confirmed executed trade in trade book (${matchResult.reason}). Classified as REGULAR per regulatory execution rule.`,
+        `Spoken order instruction confirmed in call; execution trade record not found (${matchResult.reason}). Proceeding to pre-order dialogue compliance audit.`,
         now,
         callId
       );
-
-      return {
-        success: true,
-        stage: 'REGULAR_EXIT',
-        details: {
-          classification: 'REGULAR',
-          trade_match_status: 'NO_MATCH',
-          reason: matchResult.reason || 'Order without executed trade is finalized as REGULAR and excluded from audit.',
-        },
-      };
     } else {
       // matchResult.status === 'REVIEW'
       // Multiple candidate trades, ambiguous timing, or parameter variance.
-      // Route to human compliance review workflow.
+      // Record execution as REVIEW but proceed with spoken order compliance audit.
       db.prepare(`
         UPDATE calls SET
-          classification = 'REVIEW',
-          call_type = 'review',
-          status = 'review',
-          audit_status = 'REVIEW',
-          processing_status = 'COMPLETED',
+          classification = 'PRE_ORDER',
+          call_type = 'pre_order',
           trade_match_status = 'REVIEW',
           classification_reason = ?,
-          pipeline_stage = 'REVIEW_PENDING',
+          pipeline_stage = 'TRADE_MATCHING',
           current_gate = 'GATE_5',
           gate_reason = ?,
           updated_at = ?
         WHERE id = ?
       `).run(
-        `Trade correlation requires human review (${matchResult.reason}); routed to compliance review workflow.`,
+        `Trade correlation requires review (${matchResult.reason}); proceeding to pre-order dialogue compliance audit.`,
         `Trade correlation review: ${matchResult.reason}`,
         now,
         callId
       );
-
-      return {
-        success: true,
-        stage: 'REVIEW_PENDING',
-        details: {
-          classification: 'REVIEW',
-          trade_match_status: 'REVIEW',
-          reason: matchResult.reason || 'Trade correlation ambiguous; routed to human review workflow.',
-        },
-      };
     }
 
     // ---------------------------------------------------------

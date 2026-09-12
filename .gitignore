@@ -14,5 +14,3 @@ coverage/
 .data/
 uploads/
 recordings/
-cookies.txt
-*.cookies

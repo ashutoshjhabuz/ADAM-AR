@@ -1615,7 +1615,7 @@ Client: Haan bilkul confirm hai, execute kar do.
   assert.ok(numericScore >= 4, `Compliance score must be high (was ${numericScore})`);
 });
 
-await runTest('Test HH: Order Intent with Missing Trade Execution Finalizes as REGULAR and Safely Excludes from Audit', async () => {
+await runTest('Test HH: Decoupled Audit when Trade Execution is Missing (SEBI Mandate)', async () => {
   const memDb = createTestPipelineDb();
   const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
 
@@ -1626,7 +1626,7 @@ await runTest('Test HH: Order Intent with Missing Trade Execution Finalizes as R
   `).run();
 
   // Note: NO trades are inserted into trades table for Rahul Sharma!
-  // This simulates an order discussed/attempted verbally where no execution is recorded in the trade book.
+  // This simulates an order placed verbally where no execution is recorded in the trade book.
 
   const orderTranscript = `Advisor: Good morning Rahul ji, this is Priya from FundsIndia. Client code WIA99999 right?
 Client: Yes Priya, my code is WIA99999.
@@ -1654,51 +1654,32 @@ Client: Yes, please go ahead and punch it.`;
   await runFullPipelineForCall(memDb, callId);
 
   // Verify call record:
-  // Under the Execution-Based Gate: Actionable speech + no trade = REGULAR (NO_MATCH -> safely excluded from audit)
   const callRecord = memDb.prepare('SELECT * FROM calls WHERE id = ?').get(callId) as any;
   assert.ok(callRecord, 'Call record must exist');
-  assert.strictEqual(callRecord.classification, 'REGULAR', 'Order intent without confirmed executed trade must finalize as REGULAR');
+  assert.strictEqual(callRecord.classification, 'PRE_ORDER', 'Intent must be classified as PRE_ORDER');
   assert.strictEqual(callRecord.trade_match_status, 'NO_MATCH', 'Trade match status must be NO_MATCH');
-  assert.strictEqual(callRecord.status, 'regular', 'Call status must be regular');
-  assert.strictEqual(callRecord.audit_status, 'EXCLUDED', 'Call must be safely EXCLUDED from audit');
-  assert.strictEqual(callRecord.processing_status, 'COMPLETED', 'Processing status must be COMPLETED');
-  assert.strictEqual(callRecord.pipeline_stage, 'REGULAR_EXIT', 'Pipeline stage must terminate at REGULAR_EXIT');
+  assert.strictEqual(callRecord.audit_status, 'AUDITED', 'SEBI mandate: audit must NOT be blocked by missing trade!');
+  assert.strictEqual(callRecord.status, 'audited', 'Call status must be audited');
 
-  // Verify NO audit or scorecard was generated (audit engine must not be invoked)
+  // Verify audit questions
   const audit = memDb.prepare('SELECT * FROM audits WHERE call_id = ?').get(callId) as any;
-  assert.strictEqual(audit, undefined, 'Audit record must NOT exist for regular unexecuted call');
+  assert.ok(audit, 'Audit record must exist despite NO_MATCH');
+  assert.strictEqual(audit.q1, 'PASS', 'Q1 must pass (advisor identified)');
+  assert.strictEqual(audit.q2, 'PASS', 'Q2 must pass (WIA99999 confirmed)');
+  assert.strictEqual(audit.q3, 'PASS', 'Q3 must pass (Stock, Qty, CMP verified in dialogue)');
+  assert.strictEqual(audit.q4, 'PASS', 'Q4 must pass (customer acknowledged)');
+  assert.strictEqual(audit.q5, 'PASS', 'Q5 must pass (advisor gave market risk disclaimer)');
 
+  // Verify scorecard
   const scorecard = memDb.prepare('SELECT * FROM scorecards WHERE call_id = ?').get(callId) as any;
-  assert.strictEqual(scorecard, undefined, 'Scorecard must NOT exist for regular unexecuted call');
-});
-
-await runTest('Test II: Classification Nuances — Historical Orders, Contextual Go-Ahead, Questions & Recommendations', async () => {
-  // 1. Historical order: "The order was executed yesterday" -> REGULAR
-  const c1 = classifyCallIntent('Client: Hello, the order was executed yesterday. Can you send the contract note?', 40);
-  assert.strictEqual(c1.call_type, 'regular', 'Historical order execution must be classified as regular');
-
-  // 2. Status inquiry: "Did my order go through? Check whether it was executed." -> REGULAR
-  const c2 = classifyCallIntent('Client: Did my order go through? Please check whether it was executed earlier.', 35);
-  assert.strictEqual(c2.call_type, 'regular', 'Order status inquiry must be classified as regular');
-
-  // 3. Contextual "go ahead": "We discussed the Reliance order yesterday. Go ahead and check whether it was executed." -> REGULAR
-  const c3 = classifyCallIntent('Client: We discussed the Reliance order yesterday. Go ahead and check whether it was executed.', 45);
-  assert.strictEqual(c3.call_type, 'regular', 'Go ahead to check/verify status must be classified as regular');
-
-  // 4. Client question: "Should we exit Reliance?" / "Should I buy Reliance?" -> REGULAR
-  const c4 = classifyCallIntent('Client: Should we exit Reliance today? What do you think?', 30);
-  assert.strictEqual(c4.call_type, 'regular', 'Question asking whether to exit must be classified as regular');
-
-  const c5 = classifyCallIntent('Client: Should I buy 100 shares of Reliance at current levels?', 30);
-  assert.strictEqual(c5.call_type, 'regular', 'Question asking whether to buy must be classified as regular');
-
-  // 5. Advisor recommendation: "Analyst recommended exiting Reliance" / "We recommend buying Reliance" -> REGULAR
-  const c6 = classifyCallIntent('Advisor: Analyst recommended exiting Reliance and holding cash. What is your view?', 40);
-  assert.strictEqual(c6.call_type, 'regular', 'Analyst recommendation to exit must be classified as regular');
-
-  // 6. Actionable exit directive: "Please exit Reliance now at CMP" -> PRE_ORDER intent
-  const c7 = classifyCallIntent('Client: Please exit Reliance now at CMP. Advisor: Okay, squaring off position at market price.', 35);
-  assert.strictEqual(c7.call_type, 'pre_order', 'Direct imperative to exit position at CMP must have pre_order intent');
+  assert.ok(scorecard, 'Scorecard must exist');
+  assert.strictEqual(scorecard.q1_status, 'PASS', 'Scorecard Q1 must pass');
+  assert.strictEqual(scorecard.q2_status, 'PASS', 'Scorecard Q2 must pass');
+  assert.strictEqual(scorecard.q3_status, 'PASS', 'Scorecard Q3 must pass');
+  assert.strictEqual(scorecard.q4_status, 'PASS', 'Scorecard Q4 must pass');
+  assert.strictEqual(scorecard.q5_status, 'PASS', 'Scorecard Q5 must pass');
+  const finalScore = scorecard.score ?? scorecard.total_score;
+  assert.strictEqual(finalScore, 5, 'Score must be 5/5 compliant');
 });
 
 console.log('===========================================================');

@@ -10,15 +10,16 @@
 // - UI / API endpoints
 //
 // Checks strictly:
-// 1. classification === 'PRE_ORDER' (spoken order intent + confirmed execution)
-// 2. trade_match_status === 'CONFIRMED' (qualifying trade execution verified)
-// 3. identity_status === 'CONFIRMED' (client UCC / account verified)
-// 4. transcript_status === 'VALID' (valid verbatim transcript)
-// 5. speaker attribution usable (has dialogue segments)
+// 1. classification === 'PRE_ORDER' (spoken order intent verified)
+// 2. identity_status === 'CONFIRMED' (client UCC / account verified)
+// 3. transcript_status === 'VALID' (valid verbatim transcript)
+// 4. speaker attribution usable (has dialogue segments)
 //
-// REGULATORY SPECIFICATION:
-// PRE_ORDER requires a qualifying executed trade. Calls without confirmed
-// trade execution (NO_MATCH / REVIEW) are never audited.
+// CRITICAL ARCHITECTURAL MANDATE:
+// Execution matching status (CONFIRMED / PARTIAL / NO_MATCH / REVIEW)
+// must NEVER gate or block compliance auditing. Every genuine pre-order
+// dialogue must be audited for regulatory compliance regardless of whether
+// an executed trade was found, cancelled, or pending.
 // =============================================================
 
 import type { DatabaseSync } from 'node:sqlite';
@@ -55,19 +56,7 @@ export function isAuditEligible(
     };
   }
 
-  // Gate 2: Trade Execution Verification
-  // PRE_ORDER requires a confirmed executed trade. NO_MATCH or unconfirmed trades are NOT eligible for compliance audit.
-  const tradeMatchStatus = (call.trade_match_status || '').toUpperCase();
-  const hasMatchedTrade = Boolean(call.matched_trade_id && Number(call.matched_trade_id) > 0);
-  if (tradeMatchStatus !== 'CONFIRMED' && !hasMatchedTrade) {
-    return {
-      eligible: false,
-      gateCode: 'NO_CONFIRMED_TRADE',
-      reason: `Trade execution status is "${tradeMatchStatus || 'PENDING'}". PRE_ORDER compliance audit strictly requires a confirmed qualifying trade execution.`,
-    };
-  }
-
-  // Gate 3: Identity check
+  // Gate 2: Identity check
   let identityStatus = (call.identity_status || '').toUpperCase();
   const hasClientCode = Boolean((call.client_code && call.client_code.trim()) || (call.client && call.client.trim()));
   const hasPhoneNumber = Boolean((call.phone_number && call.phone_number.trim()) || (call.calling_number && call.calling_number.trim()));
