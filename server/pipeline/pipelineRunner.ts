@@ -24,6 +24,7 @@ import { stage9PublishAudit, stage9ReconcileMissingCalls } from './reconciliatio
 import type { CallRecord } from '../../src/types';
 import type { ClassificationResult } from './types';
 import { geminiTranscribeLimiter } from '../asr-engine';
+import { detectHighRecallPreOrderCandidate } from '../classifier';
 
 export interface PipelineWorkerStatus {
   isRunning: boolean;
@@ -38,7 +39,8 @@ export interface PipelineWorkerStatus {
 
 let isWorkerLoopActive = false;
 let isHeartbeatRunning = false;
-let activeProcessingCallId: number | null = null;
+const activeProcessingCallIds = new Set<number>();
+const MAX_CONCURRENT_PIPELINE_WORKERS = 3;
 let lastHeartbeatTime = new Date().toISOString();
 let totalProcessedCount = 0;
 let rateLimitPauseUntil = 0;
@@ -212,29 +214,23 @@ export async function runFullPipelineForCall(
       classificationResult = await stage4ClassifyCall(db, callId, groqApiKey, activeGeminiKey);
     }
 
-    // STATE MACHINE GUARD:
-    // If call is SCRAP or non-order REGULAR, it MUST NOT proceed to trade matching or audit!
-    if (classificationResult.classification === 'SCRAP' || classificationResult.classification === 'REGULAR') {
-      const completionStatus = classificationResult.classification === 'SCRAP' ? 'scrap' : 'regular';
-
+    // STATE MACHINE GUARD WITH HIGH-RECALL PRE-ORDER CORROBORATION:
+    // 1. Scrap calls strictly exit immediately.
+    if (classificationResult.classification === 'SCRAP') {
       db.prepare(`
         UPDATE calls SET
-          classification = ?,
+          classification = 'SCRAP',
           audit_status = 'EXCLUDED',
           processing_status = 'COMPLETED',
-          status = ?,
-          call_type = ?,
-          pipeline_stage = ?,
+          status = 'scrap',
+          call_type = 'scrap',
+          pipeline_stage = 'SCRAP_EXIT',
           current_gate = 'GATE_4',
           gate_reason = ?,
           classification_reason = ?,
           updated_at = ?
         WHERE id = ?
       `).run(
-        classificationResult.classification,
-        completionStatus,
-        completionStatus,
-        classificationResult.classification === 'SCRAP' ? 'SCRAP_EXIT' : 'REGULAR_EXIT',
         classificationResult.reason,
         classificationResult.reason,
         now,
@@ -245,9 +241,62 @@ export async function runFullPipelineForCall(
         success: true,
         stage: 'CLASSIFICATION_EXIT',
         details: {
-          classification: classificationResult.classification,
+          classification: 'SCRAP',
           reason: classificationResult.reason,
-          message: `Call marked as ${classificationResult.classification}. Safely excluded from audit progression.`,
+          message: 'Call marked as SCRAP. Safely excluded from audit progression.',
+        },
+      };
+    }
+
+    // 2. High-Recall Pre-Order Cross-Check before finalizing REGULAR or REVIEW:
+    // Probe trade execution existence & distributed conversational order parameters
+    const highRecallCandidate = detectHighRecallPreOrderCandidate(call.transcript);
+    const tradeProbe = stage5MatchTrade(db, callId);
+    const hasCorroboratingTrade = tradeProbe.status === 'CONFIRMED' || (tradeProbe.matched_trade_id !== null && tradeProbe.matched_trade_id !== undefined);
+
+    if (classificationResult.classification === 'REGULAR' || classificationResult.classification === 'REVIEW') {
+      if (highRecallCandidate.isCandidate || hasCorroboratingTrade) {
+        // RESCUE: Genuine trading activity corroborated by distributed speech evidence or matching trade record!
+        console.log(`[Pipeline] Call #${callId} -> Rescued from ${classificationResult.classification} to PRE_ORDER (Candidate: ${highRecallCandidate.isCandidate}, TradeMatch: ${hasCorroboratingTrade})`);
+        classificationResult = {
+          classification: 'PRE_ORDER',
+          confidence: 0.95,
+          evidence: highRecallCandidate.evidence || `Corroborating trade #${tradeProbe.matched_trade_id} execution matched.`,
+          reason: highRecallCandidate.reason || `Corroborating trade #${tradeProbe.matched_trade_id} execution confirms order directive.`,
+          model: 'pre-order-recall-rescuer',
+        };
+      }
+    }
+
+    // 3. Verified non-order REGULAR calls safely exit
+    if (classificationResult.classification === 'REGULAR') {
+      db.prepare(`
+        UPDATE calls SET
+          classification = 'REGULAR',
+          audit_status = 'EXCLUDED',
+          processing_status = 'COMPLETED',
+          status = 'regular',
+          call_type = 'regular',
+          pipeline_stage = 'REGULAR_EXIT',
+          current_gate = 'GATE_4',
+          gate_reason = ?,
+          classification_reason = ?,
+          updated_at = ?
+        WHERE id = ?
+      `).run(
+        classificationResult.reason,
+        classificationResult.reason,
+        now,
+        callId
+      );
+
+      return {
+        success: true,
+        stage: 'CLASSIFICATION_EXIT',
+        details: {
+          classification: 'REGULAR',
+          reason: classificationResult.reason,
+          message: 'Call marked as REGULAR. Safely excluded from audit progression.',
         },
       };
     }
@@ -412,11 +461,11 @@ export async function runFullPipelineForCall(
     // ---------------------------------------------------------
     // STAGE 9: PUBLISH & RECONCILIATION
     // ---------------------------------------------------------
-    console.log(`[Pipeline] Call #${callId} -> Stage 9: Publish & Reconciliation`);
+    console.log(`[Pipeline] Call #${callId} -> Stage 9: Publish Audit Scorecard`);
     const published = stage9PublishAudit(db, callId, auditResult, scoreResult);
 
-    // Reconcile trades
-    stage9ReconcileMissingCalls(db);
+    // Note: stage9ReconcileMissingCalls is intentionally scheduled to background execution
+    // to prevent O(N^2) table scans choking individual call pipeline latency.
 
     db.prepare(`
       UPDATE calls SET
@@ -566,11 +615,19 @@ export async function stepAutonomousPipelineWorker(
     `).run(nowIso);
   }
 
+  // Check concurrency limit
+  if (activeProcessingCallIds.size >= MAX_CONCURRENT_PIPELINE_WORKERS) {
+    return false;
+  }
+
+  const activeIdsList = activeProcessingCallIds.size > 0 ? Array.from(activeProcessingCallIds).join(',') : '0';
+
   // 2. Candidate Selection with Smart Prioritization:
   // Priority A: Scrap calls (< 6s) - Requires zero ASR/AI calls, runs immediately
   let nextCall = db.prepare(`
     SELECT id FROM calls
-    WHERE (processing_status = 'IDLE' OR status = 'retry_pending')
+    WHERE id NOT IN (${activeIdsList})
+      AND (processing_status = 'IDLE' OR status = 'retry_pending')
       AND status NOT IN ('audited', 'scrap', 'regular', 'review')
       AND duration_seconds > 0 AND duration_seconds < 6
     ORDER BY id ASC
@@ -582,7 +639,8 @@ export async function stepAutonomousPipelineWorker(
   if (!nextCall) {
     nextCall = db.prepare(`
       SELECT id FROM calls
-      WHERE (processing_status = 'IDLE' OR processing_status IS NULL OR status = 'retry_pending' OR status = 'transcribed' OR status = 'imported')
+      WHERE id NOT IN (${activeIdsList})
+        AND (processing_status = 'IDLE' OR processing_status IS NULL OR status = 'retry_pending' OR status = 'transcribed' OR status = 'imported')
         AND status NOT IN ('audited', 'scrap', 'regular', 'review', 'blocked', 'rejected')
         AND (pipeline_stage IS NULL OR pipeline_stage NOT IN ('COMPLETED', 'SCRAP_EXIT', 'REGULAR_EXIT', 'REVIEW_PENDING', 'AUDIT_GATE_BLOCKED'))
         AND transcript_status = 'VALID'
@@ -598,7 +656,8 @@ export async function stepAutonomousPipelineWorker(
   if (!nextCall && !isAsrRateLimited) {
     nextCall = db.prepare(`
       SELECT id FROM calls
-      WHERE (processing_status = 'IDLE' OR processing_status IS NULL OR status = 'retry_pending' OR status = 'imported' OR status = 'pending')
+      WHERE id NOT IN (${activeIdsList})
+        AND (processing_status = 'IDLE' OR processing_status IS NULL OR status = 'retry_pending' OR status = 'imported' OR status = 'pending')
         AND status NOT IN ('audited', 'scrap', 'regular', 'review', 'blocked', 'rejected')
         AND (pipeline_stage IS NULL OR pipeline_stage NOT IN ('COMPLETED', 'SCRAP_EXIT', 'REGULAR_EXIT', 'REVIEW_PENDING', 'AUDIT_GATE_BLOCKED'))
         AND (audit_status != 'AUDITED' OR audit_status IS NULL)
@@ -650,9 +709,10 @@ export async function stepAutonomousPipelineWorker(
     return false;
   }
 
-  activeProcessingCallId = nextCall.id;
+  activeProcessingCallIds.add(nextCall.id);
   try {
     await runFullPipelineForCall(db, nextCall.id, groqKey, geminiKey);
+    totalProcessedCount++;
     return true;
   } catch (err: any) {
     if (err.message && (err.message.includes('429') || err.message.includes('RESOURCE_EXHAUSTED'))) {
@@ -665,12 +725,12 @@ export async function stepAutonomousPipelineWorker(
     // Returning true lets the supervisor continue processing subsequent pending calls.
     return true;
   } finally {
-    activeProcessingCallId = null;
+    activeProcessingCallIds.delete(nextCall.id);
   }
 }
 
 /**
- * Starts the continuous 24/7 supervisor timer
+ * Starts the continuous 24/7 supervisor timer with concurrent worker dispatch
  */
 export function start24x7WorkerSupervisor(
   db: DatabaseSync,
@@ -680,26 +740,22 @@ export function start24x7WorkerSupervisor(
   if (isHeartbeatRunning) return;
   isHeartbeatRunning = true;
 
-  console.log('[AuditEQ] 24/7 Autonomous Pipeline Supervisor initialized with Gemini 3.5 Transcribe protection.');
+  console.log('[AuditEQ] 24/7 Autonomous Pipeline Supervisor initialized with Gemini 3.5 Transcribe protection & multi-worker concurrency.');
   ensureCallColumns(db);
 
   setInterval(async () => {
-    if (isWorkerLoopActive) return;
-    isWorkerLoopActive = true;
+    lastHeartbeatTime = new Date().toISOString();
     try {
-      // Drain work in batches of up to 15 calls per supervisor tick
-      let hasWork = true;
-      let iterations = 0;
-      while (hasWork && iterations < 15) {
-        hasWork = await stepAutonomousPipelineWorker(db, getGroqKey, getGeminiKey);
-        iterations++;
+      const needed = MAX_CONCURRENT_PIPELINE_WORKERS - activeProcessingCallIds.size;
+      for (let i = 0; i < needed; i++) {
+        stepAutonomousPipelineWorker(db, getGroqKey, getGeminiKey).catch((err: any) => {
+          console.error('[Autonomous Worker Async Error]:', err?.message);
+        });
       }
     } catch (err: any) {
       console.error('[Autonomous Supervisor Error]:', err.message);
-    } finally {
-      isWorkerLoopActive = false;
     }
-  }, 2000);
+  }, 1000);
 }
 
 /**
@@ -731,8 +787,8 @@ export function getPipelineWorkerStatus(
     statusMessage = `Gemini 3.5 rate-limit cooldown active (${remaining}s remaining). Resuming automatically.`;
   } else if (Date.now() < rateLimitPauseUntil) {
     statusMessage = 'Rate limit backoff active (resuming automatically in seconds)';
-  } else if (activeProcessingCallId) {
-    statusMessage = `Processing Call #${activeProcessingCallId} through 9-stage pipeline`;
+  } else if (activeProcessingCallIds.size > 0) {
+    statusMessage = `Concurrently processing ${activeProcessingCallIds.size} call(s) (Calls: #${Array.from(activeProcessingCallIds).join(', #')}) through 9-stage pipeline`;
   } else if (queueDepth > 0) {
     statusMessage = `Queue has ${queueDepth} calls waiting for processing`;
   } else {
@@ -754,7 +810,7 @@ export function getPipelineWorkerStatus(
 
   return {
     isRunning: isHeartbeatRunning,
-    activeWorkers: activeProcessingCallId ? 1 : 0,
+    activeWorkers: activeProcessingCallIds.size,
     totalProcessedToday: processedToday,
     lastActiveTime: lastHeartbeatTime,
     hasGroqKey: hasGroq,
