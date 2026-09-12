@@ -67,7 +67,7 @@ import {
   type AuditQuestionOutput,
 } from './server/scoring-engine';
 import { evaluateEvidenceCompliance, verifyAuditEligibility } from './server/audit-evaluator';
-import { transcribeAudioFile } from './server/asr-engine';
+import { transcribeAudioFile, transcribeAudioWithGemini35 } from './server/asr-engine';
 import { stage1ImportCalls, type UploadedFileInfo } from './server/pipeline/import';
 import { stage2ResolveIdentity } from './server/pipeline/identity';
 import { stage3TranscribeCall } from './server/pipeline/transcription';
@@ -1592,46 +1592,16 @@ function parseTradeRecordsFromFile(filePath: string): ParsedTradeRow[] {
 }
 
 // -------------------------------------------------------------
-// Real Audio Transcription Engine (Groq Whisper + Gemini 2.5 Audio Fallback)
+// Real Audio Transcription Engine (Google Gemini 3.5 Transcribe + Fallback)
 // -------------------------------------------------------------
 async function transcribeWithGeminiAudio(filePath: string, filename: string, mimeType: string): Promise<{ transcript: string; model: string }> {
-  const geminiApiKey = process.env.GEMINI_API_KEY;
+  const geminiApiKey = getGeminiKey() || process.env.GEMINI_API_KEY;
   if (!geminiApiKey) {
     throw new Error('GEMINI_API_KEY is not configured on the server.');
   }
 
-  const fileBuffer = fs.readFileSync(filePath);
-  const base64Audio = fileBuffer.toString('base64');
-  const ai = new GoogleGenAI({ apiKey: geminiApiKey });
-
-  const response = await ai.models.generateContent({
-    model: 'gemini-2.5-flash',
-    contents: [
-      {
-        role: 'user',
-        parts: [
-          {
-            inlineData: {
-              mimeType,
-              data: base64Audio,
-            },
-          },
-          {
-            text: `You are an expert SEBI compliance auditor and stock trading telephone call transcriber.
-Transcribe this entire recorded telephone conversation verbatim with 100% accuracy.
-Ensure all client UCC codes, dealer/advisor names, stock names (such as Welspun, M&M, Infosys, Reliance, Tata, etc.), quantities, and prices (including explicit spoken phrases like "current market price", "current marker price", "CMP", "market rate") are captured accurately.
-Output ONLY the clean verbatim transcript of the conversation.`
-          },
-        ],
-      },
-    ],
-  });
-
-  const text = response.text || '';
-  if (!text.trim()) {
-    throw new Error('Gemini audio transcription returned an empty text.');
-  }
-  return { transcript: text.trim(), model: 'gemini-2.5-flash-audio' };
+  const result = await transcribeAudioWithGemini35(filePath, geminiApiKey);
+  return { transcript: result.text, model: result.model };
 }
 
 async function transcribeWithGroq(filePath: string, filename: string): Promise<{ transcript: string; model: string }> {
@@ -2412,10 +2382,20 @@ async function claimAndProcessNextJob(): Promise<boolean> {
 
       addLog('info', 'WORKER_TRANSCRIBE_COMPLETE', `Transcription and classification finished for Call #${call.id} (${finalCallType}).`);
 
-      // Only pre_order calls enter trade matching & compliance audit workflow
+      // Only order discussion calls enter trade matching; PRE_ORDER is ONLY confirmed if an executed trade matches
       if (finalCallType === 'pre_order') {
-        runMatchingForCall(call.id);
-        enqueueJob('audit', call.id, `call:${call.id}:audit`);
+        const match = runMatchingForCall(call.id);
+        if (match && match.verification_status === 'confirmed') {
+          sqlite.prepare("UPDATE calls SET classification = 'PRE_ORDER', call_type = 'pre_order', updated_at = ? WHERE id = ?").run(now, call.id);
+          enqueueJob('audit', call.id, `call:${call.id}:audit`);
+        } else if (match && (match.verification_status === 'review' || (match.verification_status as string) === 'pending_review')) {
+          sqlite.prepare("UPDATE calls SET classification = 'REVIEW', call_type = 'review', status = 'needs_review', pipeline_stage = 'completed', pipeline_status = 'completed', updated_at = ? WHERE id = ?").run(now, call.id);
+          addLog('info', 'CALL_REVIEW', `Call #${call.id} trade matching yielded pending review. Bypassing automatic audit.`);
+        } else {
+          // Order discussed but no corresponding executed trade -> REGULAR per regulatory rules
+          sqlite.prepare("UPDATE calls SET classification = 'REGULAR', call_type = 'regular', status = 'regular', pipeline_stage = 'completed', pipeline_status = 'completed', updated_at = ? WHERE id = ?").run(now, call.id);
+          addLog('info', 'ORDER_WITHOUT_TRADE', `Call #${call.id} had order intent but no corresponding executed trade found. Classified as REGULAR.`);
+        }
       } else {
         sqlite.prepare("UPDATE calls SET pipeline_stage = 'completed', pipeline_status = 'completed', updated_at = ? WHERE id = ?").run(now, call.id);
         addLog('info', 'CALL_FILTERED', `Call #${call.id} classified as "${finalCallType}". Bypassing trade compliance audit.`);
@@ -3964,7 +3944,7 @@ ${call.transcript || '(No speech transcript recorded)'}
   // 9-Stage Pipeline Status, Batches, Reconciliation & Metrics
   // -----------------------------------------------------------
   apiRouter.get('/pipeline/worker-status', requireAuth, (_req: Request, res: Response) => {
-    const status = getPipelineWorkerStatus(sqlite, getGroqKey(), process.env.GEMINI_API_KEY);
+    const status = getPipelineWorkerStatus(sqlite, getGroqKey(), getGeminiKey());
     return res.json({ ok: true, status });
   });
 
@@ -4660,13 +4640,17 @@ ${call.transcript || '(No speech transcript recorded)'}
         }
       }
 
-      const call = sqlite.prepare('SELECT client, caller_name, dealer, team, calling_number, registered_number, transcript FROM calls WHERE id = ?').get(sc.call_id) as any;
+      const call = sqlite.prepare('SELECT client, caller_name, dealer, team, calling_number, registered_number, transcript, matched_trade_id FROM calls WHERE id = ?').get(sc.call_id) as any;
+
+      const matchedTradeId = (sc as any).trade_id || (sc as any).matched_trade_id || call?.matched_trade_id;
+      const matchedTrade = (matchedTradeId ? trades.find((t: any) => t.id === matchedTradeId || t.external_id === matchedTradeId) : null)
+        || (trades.length === 1 ? trades[0] : null);
 
       let authoritativeCode = (sc.client_code && sc.client_code !== 'REVIEW / NOT RESOLVED' && sc.client_code !== '—')
         ? sc.client_code
         : (sc.client && sc.client !== 'REVIEW / NOT RESOLVED' && sc.client !== '—')
           ? sc.client
-          : trades[0]?.client || call?.client || '';
+          : matchedTrade?.client || call?.client || '';
 
       if (!authoritativeCode || authoritativeCode === 'REVIEW / NOT RESOLVED' || authoritativeCode === '—') {
         const transcriptText = call?.transcript || '';
@@ -4678,28 +4662,28 @@ ${call.transcript || '(No speech transcript recorded)'}
         }
       }
 
-      const resolvedCallDate = sc.call_date || call?.call_date || sc.trade_date || trades[0]?.trade_date || (sc.created_at ? String(sc.created_at).slice(0, 10) : new Date().toISOString().slice(0, 10));
-      const resolvedTradeDate = sc.trade_date || trades[0]?.trade_date || sc.call_date || call?.call_date || (sc.created_at ? String(sc.created_at).slice(0, 10) : new Date().toISOString().slice(0, 10));
-      const resolvedCallingPhone = (sc.calling_number && sc.calling_number !== '—') ? sc.calling_number : (call?.calling_number || call?.phone_number || trades[0]?.client_number || trades[0]?.phone_number || '');
-      const resolvedRegisteredPhone = (sc.registered_number && sc.registered_number !== '—') ? sc.registered_number : (call?.registered_number || trades[0]?.client_number || trades[0]?.phone_number || resolvedCallingPhone);
-      const resolvedTradePhone = (sc.trade_phone && sc.trade_phone !== '—') ? sc.trade_phone : (trades[0]?.client_number || trades[0]?.phone_number || resolvedRegisteredPhone);
+      const resolvedCallDate = sc.call_date || call?.call_date || sc.trade_date || matchedTrade?.trade_date || (sc.created_at ? String(sc.created_at).slice(0, 10) : new Date().toISOString().slice(0, 10));
+      const resolvedTradeDate = sc.trade_date || matchedTrade?.trade_date || sc.call_date || call?.call_date || (sc.created_at ? String(sc.created_at).slice(0, 10) : new Date().toISOString().slice(0, 10));
+      const resolvedCallingPhone = (sc.calling_number && sc.calling_number !== '—') ? sc.calling_number : (call?.calling_number || call?.phone_number || matchedTrade?.client_number || matchedTrade?.phone_number || '');
+      const resolvedRegisteredPhone = (sc.registered_number && sc.registered_number !== '—') ? sc.registered_number : (call?.registered_number || matchedTrade?.client_number || matchedTrade?.phone_number || resolvedCallingPhone);
+      const resolvedTradePhone = (sc.trade_phone && sc.trade_phone !== '—') ? sc.trade_phone : (matchedTrade?.client_number || matchedTrade?.phone_number || resolvedRegisteredPhone);
 
       return {
         ...sc,
         client_code: authoritativeCode,
         client: authoritativeCode,
-        caller_name: sc.caller_name || call?.caller_name || trades[0]?.advisor_name || '—',
-        dealer: sc.dealer || call?.dealer || trades[0]?.dealer || '—',
-        team: sc.team || call?.team || trades[0]?.team || '—',
+        caller_name: sc.caller_name || call?.caller_name || matchedTrade?.advisor_name || '—',
+        dealer: sc.dealer || call?.dealer || matchedTrade?.dealer || '—',
+        team: sc.team || call?.team || matchedTrade?.team || '—',
         trade_phone: resolvedTradePhone,
         calling_number: resolvedCallingPhone,
         registered_number: resolvedRegisteredPhone,
         trade_date: resolvedTradeDate,
         call_date: resolvedCallDate,
         transcript: call?.transcript || '',
-        symbol: trades[0]?.symbol || '',
-        price: trades[0]?.price || 0,
-        quantity: trades[0]?.quantity || 0,
+        symbol: sc.symbol || matchedTrade?.symbol || '',
+        price: sc.price || matchedTrade?.price || 0,
+        quantity: sc.quantity || matchedTrade?.quantity || 0,
         trades,
       };
     });
@@ -5953,6 +5937,8 @@ ${call.transcript || '(No speech transcript recorded)'}
   // Settings & Integrations (Whitelisted Keys)
   // -----------------------------------------------------------
   const WHITELISTED_SETTINGS = new Set([
+    'gemini_api_key',
+    'gemini_transcription_model',
     'groq_key',
     'groq_transcription_model',
     'groq_transcription_fallback',
@@ -6150,8 +6136,8 @@ ${call.transcript || '(No speech transcript recorded)'}
     const apiUrl = getTataApiUrl();
 
     try {
-      // Validate with /call_records?limit=1 first, fallback to /ping
-      let response = await fetch(`${apiUrl}/call_records?limit=1`, {
+      // T-01, T-17, T-18: Real connection test using official /call/records endpoint validating schema
+      let response = await fetch(`${apiUrl}/call/records?limit=1`, {
         method: 'GET',
         headers: {
           Authorization: `Bearer ${apiKey}`,
@@ -6160,7 +6146,7 @@ ${call.transcript || '(No speech transcript recorded)'}
       });
 
       if (response.status === 404) {
-        response = await fetch(`${apiUrl}/ping`, {
+        response = await fetch(`${apiUrl}/call_records?limit=1`, {
           method: 'GET',
           headers: {
             Authorization: `Bearer ${apiKey}`,
@@ -6169,11 +6155,15 @@ ${call.transcript || '(No speech transcript recorded)'}
         });
       }
 
-      if (response.ok || response.status === 200 || response.status === 404) {
-        addLog('info', 'TATA_CONNECTION_TEST', 'Tata Teleservices API connectivity verified.');
+      if (response.ok) {
+        const testData = (await response.json().catch(() => ({}))) as any;
+        const results = testData.results || testData.data?.results || testData.records || testData.data;
+        const schemaValid = Array.isArray(results);
+        addLog('info', 'TATA_CONNECTION_TEST', `Tata Teleservices API connectivity verified (Schema valid: ${schemaValid}).`);
         return res.json({
           ok: true,
-          message: 'Connection to Tata Teleservices Smartflo enterprise gateway established successfully.',
+          schema_verified: schemaValid,
+          message: 'Connection to Tata Teleservices Smartflo enterprise gateway established successfully (/v1/call/records verified).',
         });
       }
 
@@ -6222,97 +6212,189 @@ ${call.transcript || '(No speech transcript recorded)'}
     try {
       addLog('info', 'TATA_SYNC_START', `Initiating Tata Teleservices sync (From: ${from_date || 'Today'}, To: ${to_date || 'Today'}, Limit: ${limit}).`);
 
-      const queryParams = new URLSearchParams();
-      if (from_date) queryParams.append('from_date', from_date);
-      if (to_date) queryParams.append('to_date', to_date);
-      queryParams.append('limit', String(limit));
-
-      const response = await fetch(`${apiUrl}/call_records?${queryParams.toString()}`, {
-        headers: {
-          'Authorization': `Bearer ${apiKey}`,
-          'Accept': 'application/json',
-        },
-      });
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`Tata API error ${response.status}: ${errorText || 'Failed to fetch call records'}`);
-      }
-
-      const data = (await response.json()) as any;
-      const records = Array.isArray(data) ? data : (data.records || data.data || []);
-
       let importedCount = 0;
+      let totalFetched = 0;
+      let page = 1;
+      const pageLimit = Math.min(Number(limit) || 50, 100);
+      let hasMorePages = true;
       const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
 
-      for (const item of records) {
-        const tataCallId = item.call_id || item.id || `tata_${Date.now()}_${importedCount}`;
-        const existing = sqlite.prepare('SELECT id FROM calls WHERE recording_name = ?').get(`tata_${tataCallId}`);
-        if (existing) continue;
+      while (hasMorePages) {
+        const queryParams = new URLSearchParams();
+        if (from_date) queryParams.append('from_date', from_date);
+        if (to_date) queryParams.append('to_date', to_date);
+        queryParams.append('limit', String(pageLimit));
+        queryParams.append('page', String(page));
 
-        const callerNumber = item.caller_id || item.cli || item.customer_number || item.from || '';
-        const agentName = item.agent_name || item.extension || item.advisor_name || '';
-        const callDate = item.call_date || (item.start_time ? item.start_time.slice(0, 10) : now.slice(0, 10));
-        const callTime = item.call_time || (item.start_time ? item.start_time.slice(11, 19) : now.slice(11, 19));
-        const duration = parseInt(item.duration || item.duration_seconds || '0', 10);
-        const recordingUrl = item.recording_url || item.audio_url || '';
+        // T-01: Primary endpoint is /call/records, fallback to /call_records
+        let response = await fetch(`${apiUrl}/call/records?${queryParams.toString()}`, {
+          headers: {
+            'Authorization': `Bearer ${apiKey}`,
+            'Accept': 'application/json',
+          },
+        });
 
-        let storagePath = '';
-        if (recordingUrl) {
-          try {
-            const audioResp = await fetch(recordingUrl, {
-              headers: { Authorization: `Bearer ${apiKey}` },
-            });
-            if (audioResp.ok) {
-              const buffer = Buffer.from(await audioResp.arrayBuffer());
-              const fileName = `tata_${tataCallId}.mp3`;
-              const filePath = path.join(UPLOADS_DIR, fileName);
-              fs.writeFileSync(filePath, buffer);
-              storagePath = filePath;
-            }
-          } catch (audioErr) {
-            addLog('warning', 'TATA_AUDIO_DOWNLOAD_WARN', `Could not download audio for Tata Call #${tataCallId}: ${(audioErr as Error).message}`);
-          }
+        if (response.status === 404) {
+          response = await fetch(`${apiUrl}/call_records?${queryParams.toString()}`, {
+            headers: {
+              'Authorization': `Bearer ${apiKey}`,
+              'Accept': 'application/json',
+            },
+          });
         }
 
-        const resDb = sqlite
-          .prepare(`
-            INSERT INTO calls (
-              recording_name, recording_url, storage_path,
-              caller_name, calling_number, registered_number, call_date, call_time,
-              duration_seconds, source, status, call_type, created_at, updated_at
-            ) VALUES (
-              ?, ?, ?,
-              ?, ?, ?, ?, ?,
-              ?, 'tata', 'uploaded', 'unknown', ?, ?
-            )
-          `)
-          .run(
-            `tata_${tataCallId}`,
-            recordingUrl || null,
-            storagePath || null,
-            agentName || null,
-            callerNumber || null,
-            callerNumber || null,
-            callDate || null,
-            callTime || null,
-            duration || 0,
-            now,
-            now
-          );
+        if (!response.ok) {
+          const errorText = await response.text();
+          throw new Error(`Tata API error ${response.status}: ${errorText || 'Failed to fetch call records'}`);
+        }
 
-        const newCallId = Number(resDb.lastInsertRowid);
-        enqueueJob('transcribe', newCallId, `call:${newCallId}:transcribe`);
-        importedCount++;
+        const data = (await response.json()) as any;
+        // T-02: Parse results[] per Tata Smartflo specification
+        const records: any[] = Array.isArray(data?.results)
+          ? data.results
+          : Array.isArray(data?.data?.results)
+          ? data.data.results
+          : Array.isArray(data?.records)
+          ? data.records
+          : Array.isArray(data?.data)
+          ? data.data
+          : Array.isArray(data)
+          ? data
+          : [];
+
+        if (records.length === 0) {
+          hasMorePages = false;
+          break;
+        }
+
+        totalFetched += records.length;
+
+        for (const item of records) {
+          // T-05: Store call_id and uuid
+          const rawCallId = item.call_id || item.id || item.uuid || `tata_${Date.now()}_${importedCount}`;
+          const rawUuid = item.uuid || item.call_id || '';
+          const externalId = `tata_${rawCallId}`;
+
+          // T-12: Duplicate prevention
+          const existing = sqlite.prepare('SELECT id FROM calls WHERE external_id = ? OR recording_name = ?').get(externalId, externalId);
+          if (existing) continue;
+
+          // T-04: Caller number mapping
+          const callerNumber = item.client_number || item.caller_id_num || item.caller_id || item.customer_number || item.cli || item.from || '';
+          // T-06: Agent mapping
+          const agentName = item.agent_name || item.agent || item.extension || item.advisor_name || '';
+
+          // T-07: Date & time mapping
+          let callDate = item.call_date || item.date || '';
+          let callTime = item.call_time || item.time || '';
+          if (!callDate && item.start_time) {
+            callDate = item.start_time.slice(0, 10);
+            callTime = item.start_time.slice(11, 19);
+          } else if (!callDate && item.datetime) {
+            callDate = item.datetime.slice(0, 10);
+            callTime = item.datetime.slice(11, 19);
+          }
+          if (!callDate) callDate = now.slice(0, 10);
+          if (!callTime) callTime = now.slice(11, 19);
+
+          // T-08: Duration mapping
+          const duration = parseInt(item.call_duration || item.answered_seconds || item.duration || item.duration_seconds || '0', 10);
+          // T-09, T-26: Recording URL mapping & preservation
+          const recordingUrl = item.recording_url || item.recording || item.audio_url || '';
+
+          // T-19 to T-25: Recording download, HTTP validation, audio validation, checksum
+          let storagePath = '';
+          let fileSha256 = '';
+          let isAudioValid = false;
+          let callStatus = 'uploaded';
+
+          if (recordingUrl) {
+            try {
+              const audioResp = await fetch(recordingUrl, {
+                headers: { Authorization: `Bearer ${apiKey}` },
+              });
+
+              if (audioResp.ok) {
+                const buffer = Buffer.from(await audioResp.arrayBuffer());
+                // Validate size (> 512 bytes) and non-HTML error payload
+                if (buffer.length >= 512 && !buffer.slice(0, 50).toString().includes('<html')) {
+                  fileSha256 = crypto.createHash('sha256').update(buffer).digest('hex');
+                  const fileName = `tata_${rawCallId}.mp3`;
+                  const filePath = path.join(UPLOADS_DIR, fileName);
+                  fs.writeFileSync(filePath, buffer);
+                  storagePath = filePath;
+                  isAudioValid = true;
+                } else {
+                  callStatus = 'AUDIO_FAILED';
+                  addLog('warning', 'TATA_AUDIO_INVALID', `Downloaded audio for Tata Call #${rawCallId} failed audio validation (size: ${buffer.length}B).`);
+                }
+              } else {
+                callStatus = 'AUDIO_FAILED';
+                addLog('warning', 'TATA_AUDIO_HTTP_FAIL', `HTTP ${audioResp.status} while downloading recording for Tata Call #${rawCallId}`);
+              }
+            } catch (audioErr) {
+              callStatus = 'AUDIO_FAILED';
+              addLog('warning', 'TATA_AUDIO_DOWNLOAD_WARN', `Could not download audio for Tata Call #${rawCallId}: ${(audioErr as Error).message}`);
+            }
+          }
+
+          const resDb = sqlite
+            .prepare(`
+              INSERT INTO calls (
+                external_id, recording_name, recording_url, storage_path, file_sha256,
+                caller_name, calling_number, registered_number, call_date, call_time,
+                duration_seconds, source, status, call_type, created_at, updated_at
+              ) VALUES (
+                ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?,
+                ?, 'tata', ?, 'unknown', ?, ?
+              )
+            `)
+            .run(
+              externalId,
+              externalId,
+              recordingUrl || null,
+              storagePath || null,
+              fileSha256 || null,
+              agentName || null,
+              callerNumber || null,
+              callerNumber || null,
+              callDate || null,
+              callTime || null,
+              duration || 0,
+              callStatus,
+              now,
+              now
+            );
+
+          const newCallId = Number(resDb.lastInsertRowid);
+          // Only enqueue for transcription if audio download was successful
+          if (isAudioValid) {
+            enqueueJob('transcribe', newCallId, `call:${newCallId}:transcribe`);
+          }
+          importedCount++;
+        }
+
+        // T-10: Pagination condition
+        const totalPages = Number(data?.total_pages || data?.pagination?.total_pages || 0);
+        if (totalPages > 0 && page >= totalPages) {
+          hasMorePages = false;
+        } else if (records.length < pageLimit) {
+          hasMorePages = false;
+        } else {
+          page++;
+          if (page > 50) hasMorePages = false; // Safety ceiling
+        }
       }
 
-      addLog('info', 'TATA_SYNC_COMPLETE', `Tata Teleservices sync finished: ${importedCount} call(s) imported and queued for ASR transcription.`);
+      addLog('info', 'TATA_SYNC_COMPLETE', `Tata Teleservices sync finished: ${importedCount} call(s) imported (total fetched: ${totalFetched}) across ${page} page(s).`);
 
       return res.json({
         ok: true,
         synced_count: importedCount,
-        total_fetched: records.length,
-        message: `Successfully synced ${importedCount} call recording(s) from Tata Teleservices.`,
+        total_fetched: totalFetched,
+        pages_processed: page,
+        message: `Successfully synced ${importedCount} call recording(s) from Tata Teleservices Smartflo.`,
       });
     } catch (err: unknown) {
       const errorMsg = (err as Error).message;
@@ -6320,6 +6402,64 @@ ${call.transcript || '(No speech transcript recorded)'}
       return res.status(500).json({ ok: false, error: errorMsg });
     }
   });
+
+  // T-13 to T-16: Tata Webhook ingestion with deduplication and replay protection
+  const handleSmartfloWebhook = async (req: Request, res: Response) => {
+    const payload = req.body || {};
+    const rawCallId = payload.call_id || payload.id || payload.uuid || payload.event_id || '';
+    if (!rawCallId) {
+      return res.status(400).json({ ok: false, error: 'Missing call_id or event identifier in webhook payload.' });
+    }
+
+    const eventTimestamp = payload.timestamp || payload.call_date || payload.datetime;
+    // Replay protection: check timestamp if provided
+    if (eventTimestamp) {
+      const eventTime = new Date(eventTimestamp).getTime();
+      if (!isNaN(eventTime) && Math.abs(Date.now() - eventTime) > 24 * 60 * 60 * 1000) {
+        addLog('warning', 'WEBHOOK_REPLAY_REJECT', `Rejecting replayed or expired Smartflo webhook event: ${rawCallId}`);
+        return res.status(403).json({ ok: false, error: 'Webhook event timestamp outside acceptable replay window.' });
+      }
+    }
+
+    const externalId = `tata_${rawCallId}`;
+    const existing = sqlite.prepare('SELECT id, status FROM calls WHERE external_id = ? OR recording_name = ?').get(externalId, externalId) as any;
+    if (existing) {
+      // Event already received, return 200 idempotent acknowledgment
+      return res.json({ ok: true, message: 'Event already recorded (deduplicated).', call_id: existing.id });
+    }
+
+    const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
+    const callerNumber = payload.client_number || payload.caller_id_num || payload.caller_id || payload.customer_number || payload.from || '';
+    const agentName = payload.agent_name || payload.agent || payload.extension || '';
+    const recordingUrl = payload.recording_url || payload.recording || payload.audio_url || '';
+    const duration = parseInt(payload.call_duration || payload.answered_seconds || payload.duration || '0', 10);
+
+    const resDb = sqlite.prepare(`
+      INSERT INTO calls (
+        external_id, recording_name, recording_url, caller_name, calling_number, registered_number,
+        call_date, call_time, duration_seconds, source, status, call_type, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'tata_webhook', 'uploaded', 'unknown', ?, ?)
+    `).run(
+      externalId,
+      externalId,
+      recordingUrl || null,
+      agentName || null,
+      callerNumber || null,
+      callerNumber || null,
+      now.slice(0, 10),
+      now.slice(11, 19),
+      duration,
+      now,
+      now
+    );
+
+    const newCallId = Number(resDb.lastInsertRowid);
+    addLog('info', 'SMARTFLO_WEBHOOK_INGEST', `Smartflo webhook ingested new call #${newCallId} (External: ${rawCallId}).`);
+    return res.json({ ok: true, message: 'Webhook call event ingested successfully.', call_id: newCallId });
+  };
+
+  apiRouter.post('/tata/webhook', handleSmartfloWebhook);
+  apiRouter.post('/webhooks/smartflo', handleSmartfloWebhook);
 
   // -----------------------------------------------------------
   // Real Data-Driven Compliance Chatbot Endpoint
@@ -6524,6 +6664,8 @@ If the user's question has NOTHING to do with ADAM-AR, calls, trades, audits, co
 
   const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`AuditEQ Quality Intelligence Engine v${VERSION} running on port ${PORT}`);
+    // Boot the 24/7 Autonomous Pipeline Worker Supervisor
+    start24x7WorkerSupervisor(sqlite, getGroqKey, getGeminiKey);
   });
 
   // Graceful Shutdown handling

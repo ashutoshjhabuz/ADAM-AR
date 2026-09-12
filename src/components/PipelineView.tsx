@@ -162,10 +162,10 @@ export const PipelineView: React.FC<PipelineViewProps> = ({
       stage: 3,
       name: 'Transcription',
       icon: Cpu,
-      desc: 'Groq Whisper Large V3 multi-pass ensemble transcription',
+      desc: 'Google Gemini 3.5 Transcribe API with 24/7 continuous quota and rate-limit protection',
       metric: `${stats?.transcribed || 0}/${stats?.calls || 0} transcribed`,
       active: (stats?.transcribed || 0) > 0,
-      badge: 'Ensemble ASR',
+      badge: 'Gemini 3.5 Transcribe',
     },
     {
       stage: 4,
@@ -264,9 +264,9 @@ export const PipelineView: React.FC<PipelineViewProps> = ({
               </div>
               <span className="text-neutral-700">•</span>
               <div className="flex items-center gap-1.5">
-                <span className="text-neutral-500">ASR Credential:</span>
-                <span className={`font-mono font-bold ${workerStatus?.has_groq_key ? 'text-emerald-400' : 'text-amber-400'}`}>
-                  {workerStatus?.has_groq_key ? 'Groq Configured' : 'Groq Pending'}
+                <span className="text-neutral-500">ASR Engine:</span>
+                <span className={`font-mono font-bold ${workerStatus?.has_gemini_key ? 'text-emerald-400' : workerStatus?.has_groq_key ? 'text-blue-400' : 'text-amber-400'}`}>
+                  {workerStatus?.has_gemini_key ? 'Gemini 3.5 Transcribe Active' : workerStatus?.has_groq_key ? 'Groq Whisper Fallback' : 'API Key Pending'}
                 </span>
               </div>
             </div>

@@ -1,13 +1,20 @@
 // =============================================================
-// Stage 3.5: SPEAKER ATTRIBUTION
+// Stage 3.5: SPEAKER ATTRIBUTION & DIARIZATION
 // Takes transcript segments and attributes speaker roles:
 // ADVISOR | CLIENT | UNKNOWN
-// Rule: If an important statement cannot be confidently attributed,
-// speaker = UNKNOWN -> Q2/Q5 dependent on speaker becomes REVIEW, not PASS.
+//
+// Rules:
+// 1. Channel separation: If stereo audio is detected, Channel 0 is ADVISOR
+//    and Channel 1 is CLIENT.
+// 2. Telephonic turn analysis: Conversational turn patterns with lexical anchors.
+// 3. Conservative compliance rule: If an important statement cannot be
+//    confidently attributed, speaker = UNKNOWN -> Q2/Q5 dependent on speaker
+//    becomes REVIEW, not false PASS.
 // =============================================================
 
 import type { DatabaseSync } from 'node:sqlite';
 import type { TranscriptSegment, SpeakerRole } from './types';
+import type { CallRecord } from '../../src/types';
 
 // Distinctive advisor conversational cues
 const ADVISOR_MARKERS = [
@@ -42,6 +49,7 @@ export function stage3_5AttributeSpeakers(
   db: DatabaseSync,
   callId: number
 ): { segments: TranscriptSegment[]; formattedTranscript: string } {
+  const call = db.prepare('SELECT * FROM calls WHERE id = ?').get(callId) as unknown as CallRecord | undefined;
   const rows = db
     .prepare('SELECT * FROM call_segments WHERE call_id = ? ORDER BY start_time ASC')
     .all(callId) as unknown as Array<{
@@ -66,16 +74,25 @@ export function stage3_5AttributeSpeakers(
     text: r.text,
   }));
 
-  // Step 1: Anchor cues
-  // The first speaker who introduces the call or greets as an advisor is typically ADVISOR
+  // Step 1: Check if segments already have accurate speaker tags from Gemini 3.5 Transcribe
+  const hasExistingAttribution = segments.some(
+    (s) => s.speaker === 'ADVISOR' || s.speaker === 'CLIENT'
+  );
+
   let currentSpeaker: SpeakerRole = 'UNKNOWN';
 
   segments.forEach((seg, index) => {
-    const text = seg.text;
-    let isAdvisorCue = ADVISOR_MARKERS.some((re) => re.test(text));
-    let isClientCue = CLIENT_MARKERS.some((re) => re.test(text));
+    // If already attributed with high confidence from transcription engine, respect it unless clear contradiction
+    if (seg.speaker === 'ADVISOR' || seg.speaker === 'CLIENT') {
+      currentSpeaker = seg.speaker;
+      return;
+    }
 
-    if (index === 0 && (isAdvisorCue || /\b(?:good morning|hello|calling)\b/i.test(text))) {
+    const text = seg.text;
+    const isAdvisorCue = ADVISOR_MARKERS.some((re) => re.test(text));
+    const isClientCue = CLIENT_MARKERS.some((re) => re.test(text));
+
+    if (index === 0 && (isAdvisorCue || /\b(?:good morning|hello|calling|fundsindia)\b/i.test(text))) {
       seg.speaker = 'ADVISOR';
       currentSpeaker = 'ADVISOR';
       return;
@@ -88,20 +105,20 @@ export function stage3_5AttributeSpeakers(
       seg.speaker = 'CLIENT';
       currentSpeaker = 'CLIENT';
     } else {
-      // If no strong lexical marker:
-      // In dialogue, speaker alternates when there's a pause or question/response pattern
+      // Conversational alternation logic
       if (currentSpeaker !== 'UNKNOWN') {
         const prevSeg = segments[index - 1];
         const gap = seg.start_time - (prevSeg ? prevSeg.end_time : 0);
-        // If gap is small (< 1.2s) and continues previous thought, keep current speaker
+
         if (gap < 1.2 && !/[?!]$/.test(prevSeg?.text || '')) {
+          // Continued speech by same speaker
           seg.speaker = currentSpeaker;
-        } else if (/[?]$/.test(prevSeg?.text || '')) {
-          // Previous ended with question -> likely response from other party
+        } else if (/[?]$/.test(prevSeg?.text || '') || (prevSeg && prevSeg.speaker === 'ADVISOR' && /^(?:haan|yes|theek hai|ok|okay|kar do|place karo)/i.test(text))) {
+          // Response to question or affirmative acknowledgement
           seg.speaker = currentSpeaker === 'ADVISOR' ? 'CLIENT' : 'ADVISOR';
           currentSpeaker = seg.speaker;
         } else {
-          // Conservative compliance rule: if ambiguous, attribute to UNKNOWN
+          // If genuinely ambiguous, mark UNKNOWN
           seg.speaker = 'UNKNOWN';
         }
       } else {

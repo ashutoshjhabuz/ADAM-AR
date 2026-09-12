@@ -31,14 +31,15 @@ export function stage5MatchTrade(
     throw new Error(`Call #${callId} not found.`);
   }
 
-  // Gate: Only PRE_ORDER calls proceed to Trade Matching
-  if (call.classification !== 'PRE_ORDER') {
+  // Gate: Exclude explicit SCRAP calls from trade matching
+  const currentClass = (call.classification || call.call_type || '').toUpperCase();
+  if (currentClass === 'SCRAP') {
     const decision: TradeMatchDecision = {
       status: 'NO_MATCH',
       confidence: 0,
       margin: 0,
       matching_factors: [],
-      reason: `Call is classified as ${call.classification || 'UNKNOWN'}, not PRE_ORDER. Excluded from trade matching.`,
+      reason: `Call is classified as SCRAP. Excluded from trade matching.`,
     };
     persistTradeMatch(db, callId, decision);
     return decision;
@@ -83,34 +84,17 @@ export function stage5MatchTrade(
   let decisionStatus: 'CONFIRMED' | 'REVIEW' | 'NO_MATCH' = 'NO_MATCH';
   let reason = '';
 
-  // Rigorous scoring & separation policy
-  const isSameClientOrPhone = Boolean(
-    second && (
-      (best.trade.client && second.trade.client && normalizeClientCode(best.trade.client) === normalizeClientCode(second.trade.client)) ||
-      (normalizePhoneNumber(best.trade.phone_number || best.trade.client_number) &&
-       normalizePhoneNumber(best.trade.phone_number || best.trade.client_number) === normalizePhoneNumber(second.trade.phone_number || second.trade.client_number))
-    )
-  );
-
-  if (confidence >= 0.80) {
-    if (!second || margin >= 0.15 || isSameClientOrPhone) {
-      // High confidence with safe margin separation or same customer orders -> CONFIRMED
-      decisionStatus = 'CONFIRMED';
-      reason = `Trade #${best.trade.id} (${best.trade.symbol}) confirmed with ${(confidence * 100).toFixed(0)}% confidence.`;
-    } else {
-      // High confidence but ambiguous tie between different clients -> REVIEW
-      decisionStatus = 'REVIEW';
-      reason = `Ambiguous candidate trades: Trade #${best.trade.id} (${(confidence * 100).toFixed(0)}%) vs Trade #${second.trade.id} (${(secondScore * 100).toFixed(0)}%). Margin ${(margin * 100).toFixed(0)}% < 15%. Marked for compliance review.`;
-    }
-  } else if (confidence >= 0.50) {
-    // If single best candidate or strong separation from second candidate or same client
-    if (!second || margin >= 0.10 || isSameClientOrPhone) {
-      decisionStatus = 'CONFIRMED';
-      reason = `Trade #${best.trade.id} (${best.trade.symbol}) confirmed with ${(confidence * 100).toFixed(0)}% confidence (verified customer correlation).`;
-    } else {
-      decisionStatus = 'REVIEW';
-      reason = `Moderate correlation confidence (${(confidence * 100).toFixed(0)}%) for Trade #${best.trade.id} (${best.trade.symbol}). Marked for manual review.`;
-    }
+  // Disambiguation & Confirmation Rules (Items 6, 12, 149, 150, 151, 152)
+  if (second && best.trade.id !== second.trade.id && margin < 0.15) {
+    // Competing distinct candidate trades without sufficient separation -> REVIEW
+    decisionStatus = 'REVIEW';
+    reason = `Ambiguous candidate trades: Trade #${best.trade.id} (${(confidence * 100).toFixed(0)}%) vs Trade #${second.trade.id} (${(secondScore * 100).toFixed(0)}%). Margin ${(margin * 100).toFixed(0)}% is below 15% threshold. Sent to compliance review.`;
+  } else if (confidence >= 0.70) {
+    decisionStatus = 'CONFIRMED';
+    reason = `Trade #${best.trade.id} (${best.trade.symbol}) confirmed with ${(confidence * 100).toFixed(0)}% confidence.`;
+  } else if (confidence >= 0.40) {
+    decisionStatus = 'REVIEW';
+    reason = `Moderate correlation confidence (${(confidence * 100).toFixed(0)}%) for Trade #${best.trade.id} (${best.trade.symbol}). Marked for compliance review.`;
   } else {
     // Insufficient confidence
     decisionStatus = 'NO_MATCH';

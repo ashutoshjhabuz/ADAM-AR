@@ -167,16 +167,17 @@ export function classifyCallIntent(
   const actionableOrderPatterns = [
     /\b(?:please\s+)?(?:place|punch|execute|put)\s+(?:an?|the)?\s*(?:buy|sell)?\s*order\b/i,
     /\b(?:order\s+(?:laga|daal|punch|place|execute)\s*(?:do|dijiye|karo))\b/i,
-    /\b(?:buy|purchase|sell)\s+(?:order\s+(?:for|of)\s+)?\d+\s+(?:shares?|lots?|qty)\b/i,
+    /\b(?:buy|buying|purchase|sell|selling)\s+(?:order\s+(?:for|of)\s+)?\d+\s+(?:shares?|lots?|qty)\b/i,
     /\b\d+\s+(?:shares?|lots?|qty)\s+(?:of\s+)?(?:buy|purchase|sell)\b/i,
-    /\b(?:buy|sell)\s+(?:\d+\s+)?(?:shares?\s+(?:of\s+)?)?[a-z0-9&]+\s+(?:at|pe|on|for)\s+(?:cmp|current\s+market\s+price|market\s+price|\d+)\b/i,
-    /\b(?:buy|sell|purchase)\s+\d+\s+[a-z0-9&]+\b/i,
+    /\b(?:buy|buying|sell|selling)\s+(?:\d+\s+)?(?:shares?\s+(?:of\s+)?)?[a-z0-9&]+\s+(?:at|pe|on|for)\s+(?:cmp|current\s+market\s+price|market\s+price|\d+)\b/i,
+    /\b(?:buy|buying|sell|selling|purchase)\s+\d+\s+[a-z0-9&]+\b/i,
     /\bconfirming\s+(?:the\s+)?(?:buy|sell|order)\s+(?:for|of)\b/i,
     /\b(?:shall\s+i|can\s+i)\s+(?:execute|place|punch)\s+(?:the\s+)?order\b/i,
     /\border\s+(?:has\s+been\s+)?(?:executed|punched|placed|confirmed)\b/i,
     /\bbhav\s+pe\s+(?:le\s+lo|bech\s+do|kharid\s+lo)\b/i,
-    /\b(?:buy|sell)\s+\d+\s+(?:shares?|lots?|qty)\s+(?:of\s+)?[a-z0-9]+\b/i,
+    /\b(?:buy|buying|sell|selling)\s+\d+\s+(?:shares?|lots?|qty)\s+(?:of\s+)?[a-z0-9]+\b/i,
     /\b(?:le\s+lo|bech\s+do|kharid\s+lo|punch\s+kar\s+do|dal\s+do|daal\s+do)\b/i,
+    /\bgo\s+ahead\b/i,
   ];
 
   // Pure Discussion / Advisory / Non-actionable Inquiry Patterns
@@ -189,6 +190,15 @@ export function classifyCallIntent(
     /\b(?:contract\s+note|ledger\s+statement|portfolio\s+balance|payout|payin|funds?\s+transfer)\b/i,
     /\b(?:login\s+issue|password\s+reset|app\s+(?:not\s+working|issue)|kyc\s+update)\b/i,
     /\bcalling\s+to\s+follow\s+up\b/i,
+    /\b(?:we\s+recommend|our\s+recommendation|research\s+call|target\s+price|stop\s+loss\s+hit)\b/i,
+  ];
+
+  // Historical / Past Order Execution Discussion (NOT an order for this session)
+  const historicalOrderPatterns = [
+    /\b(?:bought\s+yesterday|sold\s+yesterday|already\s+bought|already\s+sold|already\s+placed)\b/i,
+    /\b(?:order\s+was\s+(?:placed|executed|punched)|executed\s+in\s+the\s+morning|placed\s+earlier)\b/i,
+    /\b(?:kal\s+liya\s+tha|subah\s+liya\s+tha|pehle\s+hi\s+daal\s+diya|order\s+lag\s+gaya\s+tha)\b/i,
+    /\b(?:did\s+my\s+order\s+go\s+through|check\s+order\s+status|order\s+status\s+kya\s+hai)\b/i,
   ];
 
   let hasActionableOrder = false;
@@ -213,34 +223,36 @@ export function classifyCallIntent(
     }
   }
 
-  // 4-of-5 Parameter Evaluation (SEBI Stage 4 standard)
-  const hasBuySellDirective = /\b(?:buy|buying|sell|selling|order|punch|execute|kharid|bech|le\s+lo|de\s+do|square\s*off)\b/i.test(text);
-  const hasPriceOrCmp = /\b(?:cmp|current\s*market\s*price|market\s*price|market\s*rate|at\s*market|bhav|rate|price|rs\.?|₹|\d+(?:\.\d+)?\s*(?:rs|rupees|pe))\b/i.test(text);
-  const hasQuantity = /\b(?:\d+\s*(?:shares?|lots?|qty|units|nag)|(?:one|two|three|four|five|ten|hundred|thousand|sau|hazaar)\s*(?:shares?|lots?|qty)?)\b/i.test(text) || /\b(?:buy|sell)\s+\d+\b/i.test(text);
-  const hasClientCode = /\b[A-Za-z]{2,5}[\s\-._]*\d{2,8}\b/i.test(text) || /\b(?:ucc|client\s*code|account)\b/i.test(text);
-  const hasStock = /\b(?:nifty|banknifty|reliance|tcs|infy|infosys|hdfc|icici|sbin|sbi|tata|wipro|shares?|stocks?|scrip)\b/i.test(text);
+  let hasHistoricalOnly = false;
+  let historicalEvidence = '';
+  for (const p of historicalOrderPatterns) {
+    const match = text.match(p);
+    if (match) {
+      hasHistoricalOnly = true;
+      historicalEvidence = match[0];
+      break;
+    }
+  }
 
-  let paramScore = 0;
-  if (hasBuySellDirective) paramScore++;
-  if (hasPriceOrCmp) paramScore++;
-  if (hasQuantity) paramScore++;
-  if (hasClientCode) paramScore++;
-  if (hasStock) paramScore++;
+  // Check semantic grounding: An actionable pre-order requires order directive with security or action context
+  // NOTE: The legacy 4-of-5 arbitrary parameter check has been COMPLETELY REMOVED per SEBI compliance mandate.
+  // Pre-order requires genuine immediate execution intent, not a keyword count.
 
-  // Decision Logic:
-  if (paramScore >= 4 || (hasActionableOrder && !hasDiscussionOnly)) {
+  // 1. If past order inquiry without new immediate order directive -> REGULAR
+  if (hasHistoricalOnly && !hasActionableOrder) {
     return {
-      call_type: 'pre_order',
+      call_type: 'regular',
       confidence: 0.95,
-      evidence: orderEvidence || (text.slice(0, 100)),
+      evidence: historicalEvidence,
       evidence_speaker: 'CLIENT',
       evidence_timestamp: '00:00:10',
-      reason: `Pre-order confirmed: ${paramScore >= 4 ? `${paramScore}/5 parameters verified` : 'Actionable trading order directive detected'}.`,
+      reason: 'Historical order status inquiry without current actionable trade placement.',
       model_used: 'semantic-rules-v18',
       prompt_version: 'v18.0.0',
     };
   }
 
+  // 2. Pure market discussion/advisory without immediate order directive -> REGULAR
   if (hasDiscussionOnly && !hasActionableOrder) {
     return {
       call_type: 'regular',
@@ -254,8 +266,22 @@ export function classifyCallIntent(
     };
   }
 
+  // 3. Actionable current order intent present without conflicting discussion -> PRE_ORDER
+  if (hasActionableOrder && !hasDiscussionOnly) {
+    return {
+      call_type: 'pre_order',
+      confidence: 0.96,
+      evidence: orderEvidence,
+      evidence_speaker: 'CLIENT',
+      evidence_timestamp: '00:00:10',
+      reason: 'Actionable trading order directive confirmed for immediate execution.',
+      model_used: 'semantic-rules-v18',
+      prompt_version: 'v18.0.0',
+    };
+  }
+
+  // 4. Both actionable order directive AND conflicting market discussion/inquiry -> REVIEW (Genuine ambiguous third state)
   if (hasActionableOrder && hasDiscussionOnly) {
-    // Both discussion and order terms present -> Requires human review
     return {
       call_type: 'review',
       confidence: 0.65,

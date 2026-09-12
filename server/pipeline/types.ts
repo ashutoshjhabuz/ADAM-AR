@@ -141,3 +141,29 @@ export interface PipelineCallState {
   processing_status: ProcessingStatus;
   failure_reason?: string;
 }
+
+export interface StructuredOrderExtraction {
+  action: 'BUY' | 'SELL' | null;
+  symbol: string | null;
+  quantity: number | null;
+  price: number | null;
+  price_type: 'CMP' | 'LTP' | 'LIMIT' | 'MARKET' | null;
+  ucc: string | null;
+  order_timing: 'CURRENT' | 'HISTORICAL' | 'FUTURE' | 'UNKNOWN';
+  confidence: {
+    action: number;
+    symbol: number;
+    quantity: number;
+    price: number;
+    ucc: number;
+    overall: number;
+  };
+  evidence: {
+    action?: string[];
+    symbol?: string[];
+    quantity?: string[];
+    price?: string[];
+    price_type?: string[];
+    ucc?: string[];
+  };
+}

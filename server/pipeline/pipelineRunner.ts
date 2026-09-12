@@ -22,6 +22,7 @@ import { stage7AuditCall } from './audit';
 import { stage8CalculateScore } from './scoring';
 import { stage9PublishAudit, stage9ReconcileMissingCalls } from './reconciliation';
 import type { CallRecord } from '../../src/types';
+import { geminiTranscribeLimiter } from '../asr-engine';
 
 export interface PipelineWorkerStatus {
   isRunning: boolean;
@@ -47,7 +48,8 @@ let rateLimitPauseUntil = 0;
 export async function runFullPipelineForCall(
   db: DatabaseSync,
   callId: number,
-  groqApiKey?: string
+  groqApiKey?: string,
+  geminiApiKey?: string
 ): Promise<{ success: boolean; stage: string; details: any }> {
   const call = db.prepare('SELECT * FROM calls WHERE id = ?').get(callId) as unknown as CallRecord | undefined;
   if (!call) {
@@ -57,20 +59,22 @@ export async function runFullPipelineForCall(
   const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
   db.prepare("UPDATE calls SET processing_status = 'PROCESSING', updated_at = ? WHERE id = ?").run(now, callId);
 
+  const activeGeminiKey = geminiApiKey || process.env.GEMINI_API_KEY;
+
   try {
     // ---------------------------------------------------------
     // STAGE 2: IDENTITY RESOLUTION
     // ---------------------------------------------------------
     console.log(`[Pipeline] Call #${callId} -> Stage 2: Identity Resolution`);
-    const identityResult = stage2ResolveIdentity(db, callId);
+    stage2ResolveIdentity(db, callId);
 
     // ---------------------------------------------------------
-    // STAGE 3: TRANSCRIPTION (Independent Whisper Hearing)
+    // STAGE 3: TRANSCRIPTION (Google Gemini 3.5 Transcribe)
     // ---------------------------------------------------------
     let currentCall = db.prepare('SELECT * FROM calls WHERE id = ?').get(callId) as unknown as CallRecord;
     if (currentCall.transcript_status !== 'VALID' || !currentCall.transcript) {
-      console.log(`[Pipeline] Call #${callId} -> Stage 3: Transcription`);
-      await stage3TranscribeCall(db, callId, groqApiKey);
+      console.log(`[Pipeline] Call #${callId} -> Stage 3: Transcription (Gemini 3.5 Transcribe)`);
+      await stage3TranscribeCall(db, callId, groqApiKey, activeGeminiKey);
     }
 
     // ---------------------------------------------------------
@@ -83,26 +87,35 @@ export async function runFullPipelineForCall(
     stage2ResolveIdentity(db, callId);
 
     // ---------------------------------------------------------
-    // STAGE 4: AI CALL CLASSIFICATION
     // ---------------------------------------------------------
-    console.log(`[Pipeline] Call #${callId} -> Stage 4: AI Call Classification`);
-    const classificationResult = await stage4ClassifyCall(db, callId, groqApiKey);
+    // STAGE 4: AI CALL INTENT CLASSIFICATION
+    // ---------------------------------------------------------
+    console.log(`[Pipeline] Call #${callId} -> Stage 4: AI Call Intent Classification`);
+    const classificationResult = await stage4ClassifyCall(db, callId, groqApiKey, activeGeminiKey);
 
     // STATE MACHINE GUARD:
-    // If call is SCRAP, REGULAR, or REVIEW, it MUST NOT proceed to trade matching or audit!
-    if (classificationResult.classification !== 'PRE_ORDER') {
-      const completionStatus = classificationResult.classification === 'SCRAP' ? 'scrap'
-        : classificationResult.classification === 'REGULAR' ? 'regular' : 'needs_review';
+    // If call is SCRAP or non-order REGULAR, it MUST NOT proceed to trade matching or audit!
+    if (classificationResult.classification === 'SCRAP' || classificationResult.classification === 'REGULAR') {
+      const completionStatus = classificationResult.classification === 'SCRAP' ? 'scrap' : 'regular';
 
       db.prepare(`
         UPDATE calls SET
+          classification = ?,
           audit_status = 'EXCLUDED',
           processing_status = 'COMPLETED',
           status = ?,
           call_type = ?,
+          classification_reason = ?,
           updated_at = ?
         WHERE id = ?
-      `).run(completionStatus, completionStatus, now, callId);
+      `).run(
+        classificationResult.classification,
+        completionStatus,
+        completionStatus,
+        classificationResult.reason,
+        now,
+        callId
+      );
 
       return {
         success: true,
@@ -110,13 +123,17 @@ export async function runFullPipelineForCall(
         details: {
           classification: classificationResult.classification,
           reason: classificationResult.reason,
-          message: `Call marked as ${classificationResult.classification}. Strict compliance guard safely blocked audit progression.`,
+          message: `Call marked as ${classificationResult.classification}. Safely excluded from audit progression.`,
         },
       };
     }
 
     // ---------------------------------------------------------
     // STAGE 5: EXACT TRADE MATCHING
+    // Was THIS call related to THAT executed trade?
+    // YES -> PRE_ORDER (Proceeds to Audit)
+    // NO -> REGULAR (Order discussed but no trade executed)
+    // UNCLEAR -> REVIEW (Multiple trades or ambiguous variance)
     // ---------------------------------------------------------
     console.log(`[Pipeline] Call #${callId} -> Stage 5: Exact Trade Matching`);
     const matchResult = stage5MatchTrade(db, callId);
@@ -126,25 +143,82 @@ export async function runFullPipelineForCall(
       stage2ResolveIdentity(db, callId);
     }
 
-    // STATE MACHINE GUARD:
-    // If trade match is not CONFIRMED, it MUST NOT proceed to audit!
-    if (matchResult.status !== 'CONFIRMED') {
+    // FINAL CLASSIFICATION DECISION (Items 1 to 15, 139 to 152)
+    if (matchResult.status === 'CONFIRMED') {
+      // Confirmed executed trade correlation verified
       db.prepare(`
         UPDATE calls SET
-          audit_status = 'BLOCKED',
-          processing_status = 'COMPLETED',
-          status = ?,
+          classification = 'PRE_ORDER',
+          call_type = 'pre_order',
+          status = 'pre_order',
+          trade_match_status = 'CONFIRMED',
+          classification_reason = ?,
           updated_at = ?
         WHERE id = ?
-      `).run(matchResult.status === 'REVIEW' ? 'needs_review' : 'unmatched', now, callId);
+      `).run(
+        `Verified pre-order instruction linked to executed trade #${matchResult.matched_trade_id}.`,
+        now,
+        callId
+      );
+    } else if (matchResult.status === 'NO_MATCH') {
+      // Order discussed during call, but NO corresponding executed trade found (or wrong trade)
+      // Per Rule 4 & 13: Order with no trade must NOT become PRE_ORDER. Classified as REGULAR.
+      db.prepare(`
+        UPDATE calls SET
+          classification = 'REGULAR',
+          call_type = 'regular',
+          status = 'regular',
+          trade_match_status = 'NO_MATCH',
+          audit_status = 'EXCLUDED',
+          processing_status = 'COMPLETED',
+          classification_reason = ?,
+          updated_at = ?
+        WHERE id = ?
+      `).run(
+        `Order was discussed during call, but no corresponding executed trade found in trading records. Classified as REGULAR per regulatory rule. (${matchResult.reason})`,
+        now,
+        callId
+      );
 
       return {
         success: true,
-        stage: 'TRADE_MATCH_EXIT',
+        stage: 'ORDER_WITHOUT_TRADE_EXIT',
         details: {
-          trade_match_status: matchResult.status,
+          classification: 'REGULAR',
+          trade_match_status: 'NO_MATCH',
           reason: matchResult.reason,
-          message: `Trade matching yielded ${matchResult.status}. Blocked from audit progression.`,
+          message: 'Order discussed without corresponding executed trade. Safely classified as REGULAR.',
+        },
+      };
+    } else {
+      // matchResult.status === 'REVIEW'
+      // Multiple candidate trades, ambiguous timing, or parameter variance.
+      // Per Rule 6 & 12: Send to REVIEW instead of guessing.
+      db.prepare(`
+        UPDATE calls SET
+          classification = 'REVIEW',
+          call_type = 'review',
+          status = 'needs_review',
+          trade_match_status = 'REVIEW',
+          audit_status = 'BLOCKED',
+          processing_status = 'COMPLETED',
+          classification_reason = ?,
+          updated_at = ?
+        WHERE id = ?
+      `).run(
+        `Trade correlation requires compliance review: ${matchResult.reason}`,
+        now,
+        callId
+      );
+
+      return {
+        success: true,
+        stage: 'TRADE_REVIEW_EXIT',
+        details: {
+          classification: 'REVIEW',
+          trade_match_status: 'REVIEW',
+          reason: matchResult.reason,
+          message: 'Trade matching yielded REVIEW. Flagged for compliance review.',
         },
       };
     }
@@ -178,7 +252,7 @@ export async function runFullPipelineForCall(
     const auditResult = await stage7AuditCall(db, callId, groqApiKey);
 
     // ---------------------------------------------------------
-    // STAGE 8: SCORING (Unified Single Engine, Max 4)
+    // STAGE 8: SCORING (Unified Single Engine, Max 5)
     // ---------------------------------------------------------
     console.log(`[Pipeline] Call #${callId} -> Stage 8: Unified Scoring`);
     const scoreResult = stage8CalculateScore(auditResult);
@@ -226,12 +300,13 @@ export async function runFullPipelineForCall(
  */
 export async function stepAutonomousPipelineWorker(
   db: DatabaseSync,
-  getGroqKey: () => string | undefined
+  getGroqKey: () => string | undefined,
+  getGeminiKey?: () => string | undefined
 ): Promise<boolean> {
   lastHeartbeatTime = new Date().toISOString();
 
   // If rate-limited, wait out the backoff period
-  if (Date.now() < rateLimitPauseUntil) {
+  if (Date.now() < rateLimitPauseUntil || geminiTranscribeLimiter.isRateLimited()) {
     return false;
   }
 
@@ -245,9 +320,6 @@ export async function stepAutonomousPipelineWorker(
   `).run(new Date().toISOString().replace('T', ' ').slice(0, 19), twoMinutesAgo);
 
   // 2. Pick next pending call
-  // Priority:
-  // - imported calls needing full pipeline
-  // - calls with classification 'PRE_ORDER' and identity 'CONFIRMED' needing audit
   const nextCall = db.prepare(`
     SELECT id FROM calls
     WHERE processing_status = 'IDLE'
@@ -262,19 +334,20 @@ export async function stepAutonomousPipelineWorker(
   }
 
   const groqKey = getGroqKey();
-  if (!groqKey || !groqKey.trim()) {
-    // API key not entered yet -> Worker waits gracefully in standby
+  const geminiKey = getGeminiKey ? getGeminiKey() : process.env.GEMINI_API_KEY;
+
+  if ((!groqKey || !groqKey.trim()) && (!geminiKey || !geminiKey.trim())) {
+    // API keys not entered yet -> Worker waits gracefully in standby
     return false;
   }
 
   activeProcessingCallId = nextCall.id;
   try {
-    await runFullPipelineForCall(db, nextCall.id, groqKey);
+    await runFullPipelineForCall(db, nextCall.id, groqKey, geminiKey);
     return true;
   } catch (err: any) {
-    // Check if error was a 429 rate limit
-    if (err.message && err.message.includes('429')) {
-      console.warn('[Autonomous Worker] Groq rate limit (429) encountered. Backing off for 25 seconds...');
+    if (err.message && (err.message.includes('429') || err.message.includes('RESOURCE_EXHAUSTED'))) {
+      console.warn('[Autonomous Worker] Rate limit (429) encountered. Backing off for 25 seconds...');
       rateLimitPauseUntil = Date.now() + 25000;
     }
     return false;
@@ -288,18 +361,19 @@ export async function stepAutonomousPipelineWorker(
  */
 export function start24x7WorkerSupervisor(
   db: DatabaseSync,
-  getGroqKey: () => string | undefined
+  getGroqKey: () => string | undefined,
+  getGeminiKey?: () => string | undefined
 ): void {
   if (isHeartbeatRunning) return;
   isHeartbeatRunning = true;
 
-  console.log('[AuditEQ] 24/7 Autonomous Pipeline Supervisor initialized.');
+  console.log('[AuditEQ] 24/7 Autonomous Pipeline Supervisor initialized with Gemini 3.5 Transcribe protection.');
 
   setInterval(async () => {
     if (isWorkerLoopActive) return;
     isWorkerLoopActive = true;
     try {
-      await stepAutonomousPipelineWorker(db, getGroqKey);
+      await stepAutonomousPipelineWorker(db, getGroqKey, getGeminiKey);
     } catch (err: any) {
       console.error('[Autonomous Supervisor Error]:', err.message);
     } finally {
@@ -326,11 +400,15 @@ export function getPipelineWorkerStatus(
   )?.count || 0;
 
   const hasGroq = Boolean(groqKey && groqKey.trim());
-  const hasGemini = Boolean(geminiKey && geminiKey.trim());
+  const activeGeminiKey = geminiKey || process.env.GEMINI_API_KEY;
+  const hasGemini = Boolean(activeGeminiKey && activeGeminiKey.trim());
 
-  let statusMessage = '24/7 Autonomous AI Worker Active';
-  if (!hasGroq) {
-    statusMessage = 'Awaiting Groq API Key (enter key in Settings to activate AI processing)';
+  let statusMessage = '24/7 Autonomous AI Worker Active (Gemini 3.5 Transcribe Protected)';
+  if (!hasGemini && !hasGroq) {
+    statusMessage = 'Awaiting API Key (enter GEMINI_API_KEY or GROQ_API_KEY in Settings to activate AI processing)';
+  } else if (geminiTranscribeLimiter.isRateLimited()) {
+    const remaining = geminiTranscribeLimiter.getRemainingCooldownSec();
+    statusMessage = `Gemini 3.5 rate-limit cooldown active (${remaining}s remaining). Resuming automatically.`;
   } else if (Date.now() < rateLimitPauseUntil) {
     statusMessage = 'Rate limit backoff active (resuming automatically in seconds)';
   } else if (activeProcessingCallId) {

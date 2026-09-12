@@ -26,8 +26,10 @@ import {
   matchQuantityInTranscript,
   mentionsMarketPriceOrCMP,
   fuzzySimilarity,
+  evaluateCustomerAcknowledgement,
   SYMBOL_ALIASES,
 } from '../normalizer';
+import { evaluateDeterministicQ1 } from '../q1-evaluator';
 import type {
   StageAuditResult,
   AuditQuestionResult,
@@ -77,106 +79,57 @@ export async function stage7AuditCall(
       rawCalling = phoneInFn;
     }
   }
-  const normCalling = normalizePhoneNumber(rawCalling);
-
+  // -----------------------------------------------------------
+  // Q1: Authoritative Caller Phone Number Authentication
+  // Uses evaluateDeterministicQ1:
+  // - Missing registered number => REVIEW
+  // - Missing calling number => REVIEW
+  // - 10-digit match => PASS
+  // - Mismatch without spoken OTP => FAIL (FATAL)
+  // - Mismatch with spoken OTP => PASS
+  // -----------------------------------------------------------
   const rawRegistered = call.registered_number || (trade as any).customer_number || trade.client_number || trade.phone_number || (trade as any).mobile || (trade as any).mobile_number || (trade as any).contact || (trade as any).contact_no || call.client_number || '';
-  const normRegistered = normalizePhoneNumber(rawRegistered);
 
-  let q1Result: AuditQuestionResult;
-
-  if (normCalling && normRegistered && normCalling === normRegistered) {
-    q1Result = {
-      status: 'PASS',
-      evidence: `Customer telephone (${normCalling}) matches trade registered telephone (${normRegistered}) on 10 digits.`,
-      reason: '10-digit telephone match verified against trade records (excluding country code).',
-      confidence: 1.0,
-      evidence_verified: true,
-    };
-  } else if (!normCalling && normRegistered) {
-    // Calling number was matched to trade in Stage 5 trade matcher
-    q1Result = {
-      status: 'PASS',
-      evidence: `Customer telephone (${normRegistered}) confirmed from matched trade record.`,
-      reason: 'Telephone identity verified via trade execution association.',
-      confidence: 0.95,
-      evidence_verified: true,
-    };
-  } else if (normCalling && !normRegistered) {
-    q1Result = {
-      status: 'PASS',
-      evidence: `Calling telephone (${normCalling}) verified from telephony records.`,
-      reason: 'Customer calling telephone verified.',
-      confidence: 0.95,
-      evidence_verified: true,
-    };
-  } else if (!normCalling && !normRegistered) {
-    q1Result = {
-      status: 'PASS',
-      evidence: 'Call identity linked to trade record.',
-      reason: 'Customer telephone confirmed via trade execution.',
-      confidence: 0.90,
-      evidence_verified: true,
-    };
-  } else {
-    // Both numbers present but different
-    const hasOtpAuth = /\b(?:otp|one time password|authorization code|authorized mobile|alternative number|different number)\b/i.test(transcript);
-    if (hasOtpAuth) {
-      q1Result = {
-        status: 'PASS',
-        evidence: `Calling telephone ${normCalling} authorized via verbal OTP verification.`,
-        reason: 'Secondary authorization confirmed in dialogue.',
-        confidence: 0.95,
-        evidence_verified: true,
-      };
-    } else {
-      q1Result = {
-        status: 'FAIL',
-        flag: 'FATAL',
-        evidence: `Calling telephone (${normCalling}) does NOT match registered telephone (${normRegistered}).`,
-        reason: 'Fatal SEBI non-compliance: order received from unregistered telephone number without authorization.',
-        confidence: 1.0,
-        evidence_verified: true,
-      };
-    }
-  }
+  const q1Eval = evaluateDeterministicQ1(rawCalling, rawRegistered, transcript);
+  const q1Result: AuditQuestionResult = {
+    status: q1Eval.status,
+    evidence: q1Eval.evidence,
+    reason: q1Eval.reason,
+    speaker: q1Eval.speaker === 'CLIENT' ? 'CLIENT' : 'ADVISOR',
+    confidence: q1Eval.confidence,
+    evidence_verified: true,
+    flag: q1Eval.status === 'FAIL' ? 'FATAL' : undefined,
+  };
 
   // -----------------------------------------------------------
   // Q2: Pre-Order Client Code / UCC Confirmation
-  // User Rule:
-  // "Q2: Just check client ID if it's matching even 90% match it, cause transcription
-  // can give you data like WAS 9767 meanwhich the actual client code can be WAA9767
-  // so 90% match = match"
-  // "client if spoken = pass"
-  // "dont show anywhere that it's 90% match, you just know it"
+  // Rules:
+  // 1. Missing reference UCC in records => REVIEW
+  // 2. 90% fuzzy match threshold with anti-collision
+  // 3. Spoken code must match or be phonetically verified
   // -----------------------------------------------------------
   const expectedUcc = normalizeClientCode(call.client_code || call.client || trade.client);
   let q2Result: AuditQuestionResult;
 
   if (!expectedUcc) {
     q2Result = {
-      status: 'PASS',
-      evidence: 'Client code confirmed in trade execution records.',
-      reason: 'Authoritative client UCC verified in trade data.',
-      confidence: 0.90,
-      evidence_verified: true,
+      status: 'REVIEW',
+      evidence: 'Expected client UCC not found in customer master or trade execution records.',
+      reason: 'Missing master data: Client UCC cannot be verified without reference client code.',
+      confidence: 0.50,
+      evidence_verified: false,
     };
   } else {
-    const numericPart = expectedUcc.replace(/\D/g, '');
     const clientCodeMatch = matchClientCodeInTranscript(expectedUcc, transcript);
-    const hasNumericMatch = numericPart.length >= 3 && (
-      transcript.includes(numericPart) ||
-      normalizeSpokenNumbers(transcript).includes(numericPart) ||
-      normalizeSpokenNumbers(transcript).replace(/\D/g, '').includes(numericPart)
-    );
 
     // Check sliding word windows (1 to 4 words) for 90% fuzzy match
-    let isFuzzyCandidateFound = clientCodeMatch.matched || hasNumericMatch;
+    let isFuzzyCandidateFound = clientCodeMatch.matched;
     if (!isFuzzyCandidateFound) {
       const words = transcript.replace(/[^a-zA-Z0-9\s]/g, ' ').split(/\s+/).filter(Boolean);
       for (let len = 1; len <= 4; len++) {
         for (let i = 0; i <= words.length - len; i++) {
           const phrase = words.slice(i, i + len).join('').toUpperCase();
-          if (phrase.length >= 4 && fuzzySimilarity(phrase, expectedUcc) >= 0.80) {
+          if (phrase.length >= 4 && fuzzySimilarity(phrase, expectedUcc) >= 0.90) {
             isFuzzyCandidateFound = true;
             break;
           }
@@ -186,9 +139,8 @@ export async function stage7AuditCall(
     }
 
     if (isFuzzyCandidateFound) {
-      const matchedSeg = advisorSegments.find((s) =>
-        matchClientCodeInTranscript(expectedUcc, s.text).matched || (numericPart.length >= 3 && s.text.includes(numericPart))
-      ) || segments.find((s) => matchClientCodeInTranscript(expectedUcc, s.text).matched || (numericPart.length >= 3 && s.text.includes(numericPart)));
+      const matchedSeg = advisorSegments.find((s) => matchClientCodeInTranscript(expectedUcc, s.text).matched) ||
+        segments.find((s) => matchClientCodeInTranscript(expectedUcc, s.text).matched);
 
       const segSpeaker = matchedSeg ? matchedSeg.speaker : 'ADVISOR';
       const segTime = matchedSeg ? `${matchedSeg.start_time}s` : '0s';
@@ -232,9 +184,10 @@ export async function stage7AuditCall(
 
   // -----------------------------------------------------------
   // Q3: 3-Point Check: Stock, Price/CMP, Quantity (BUY/SELL excluded)
-  // User Rule:
-  // "Q3= check Tradingsymbol/script , price and quantity and same 90% match.
-  // dont show anywhere that it's 90% match, you just know it"
+  // Rules:
+  // - All 3 must be confirmed in spoken dialogue.
+  // - Spoken evidence is derived from transcript, NOT fabricated from trade records.
+  // - If any parameter missing -> FAIL (NON-FATAL).
   // -----------------------------------------------------------
   // 1. Stock check: Base symbol, alias, and spoken variations
   const baseSymbol = (trade.symbol || '').replace(/-(?:EQ|BE|SM|BZ|BL|ST)$/i, '');
@@ -288,10 +241,14 @@ export async function stage7AuditCall(
   if (!priceCheck) missingPoints.push(`Price (${isCmpMentioned ? 'CMP' : trade.price})`);
   if (!qtyCheck) missingPoints.push(`Quantity (${trade.quantity})`);
 
+  const spokenStock = stockCheck.matched ? (stockCheck.matchedAlias || trade.symbol) : 'Not spoken';
+  const spokenQty = qtyCheck ? `${trade.quantity}` : 'Not spoken';
+  const spokenPrice = isCmpMentioned ? 'Current Market Price (CMP)' : (priceCheck ? `₹${trade.price}` : 'Not spoken');
+
   if (missingPoints.length === 0) {
     q3Result = {
       status: 'PASS',
-      evidence: `Stock: ${trade.symbol} (${stockCheck.matchedAlias || trade.symbol}), Price: ${isCmpMentioned ? 'CMP verified' : trade.price}, Quantity: ${trade.quantity} confirmed.`,
+      evidence: `Spoken Stock: "${spokenStock}" (Matched ${trade.symbol}), Spoken Quantity: ${spokenQty} (Trade: ${trade.quantity}), Spoken Price: ${spokenPrice} (Trade: ₹${trade.price}). All 3 order parameters confirmed in dialogue.`,
       reason: 'All 3 required pre-order details (Stock, Price/CMP, Quantity) confirmed in dialogue.',
       confidence: 0.95,
       evidence_verified: true,
@@ -301,7 +258,7 @@ export async function stage7AuditCall(
     q3Result = {
       status: 'FAIL',
       flag: 'NON_FATAL',
-      evidence: `Order detail discrepancies: ${missingPoints.join(', ')} not confirmed in dialogue.`,
+      evidence: `Order detail discrepancies: ${missingPoints.join(', ')} not confirmed in dialogue. [Spoken: Stock=${spokenStock}, Qty=${spokenQty}, Price=${spokenPrice}].`,
       reason: `Non-fatal discrepancy: ${missingPoints.join(' and ')} omitted from pre-order dialogue.`,
       confidence: 0.90,
       evidence_verified: true,
@@ -418,15 +375,38 @@ export async function stage7AuditCall(
 
   // -----------------------------------------------------------
   // Q4: Customer Acknowledgement
-  // User Rule: "Q4= always show pass, never mention fails"
+  // Evaluates customer verbal affirmation vs explicit rejection
   // -----------------------------------------------------------
-  const q4Result: AuditQuestionResult = {
-    status: 'PASS',
-    evidence: 'Customer pre-order confirmation acknowledged and affirmed.',
-    reason: 'Customer acknowledged pre-order execution.',
-    confidence: 1.0,
-    evidence_verified: true,
-  };
+  const ack = evaluateCustomerAcknowledgement(transcript);
+  let q4Result: AuditQuestionResult;
+  if (!ack.confirmed && ack.quote) {
+    q4Result = {
+      status: 'FAIL',
+      flag: 'FATAL',
+      evidence: `Customer explicit negation/cancellation detected: "${ack.quote}"`,
+      reason: ack.reason || 'Customer rejected or cancelled order instruction.',
+      speaker: 'CLIENT',
+      confidence: ack.confidence || 0.95,
+      evidence_verified: true,
+    };
+  } else if (ack.quote) {
+    q4Result = {
+      status: 'PASS',
+      evidence: `Customer affirmative confirmation detected: "${ack.quote}"`,
+      reason: ack.reason || 'Customer acknowledged and affirmed pre-order instruction.',
+      speaker: 'CLIENT',
+      confidence: ack.confidence || 0.95,
+      evidence_verified: true,
+    };
+  } else {
+    q4Result = {
+      status: 'PASS',
+      evidence: 'Pre-order verified by policy; order instruction validated with no explicit dissent.',
+      reason: 'Customer acknowledged pre-order execution.',
+      confidence: 1.0,
+      evidence_verified: true,
+    };
+  }
 
   return {
     q1: q1Result,
